@@ -89,9 +89,9 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/api/zealthix/") ||
     pathname.startsWith("/api/public/") ||
     pathname.startsWith("/api/patient/self-register") ||
-    // Track B API routes for AI voice booking
+    // Track B & Track A API routes for AI voice booking / registration
     pathname.startsWith("/api/voice/") ||
-    pathname.startsWith("/api/organisations/") ||
+    pathname.startsWith("/api/organisations") ||
     pathname.startsWith("/api/doctors/") ||
     pathname.startsWith("/api/appointments") ||
     pathname.startsWith("/api/notifications/")
