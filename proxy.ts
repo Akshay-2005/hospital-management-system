@@ -88,7 +88,13 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/api/verify-lab-pharmacy") ||
     pathname.startsWith("/api/zealthix/") ||
     pathname.startsWith("/api/public/") ||
-    pathname.startsWith("/api/patient/self-register")
+    pathname.startsWith("/api/patient/self-register") ||
+    // Track B API routes for AI voice booking
+    pathname.startsWith("/api/voice/") ||
+    pathname.startsWith("/api/organisations/") ||
+    pathname.startsWith("/api/doctors/") ||
+    pathname.startsWith("/api/appointments") ||
+    pathname.startsWith("/api/notifications/")
   ) {
     return NextResponse.next();
   }
