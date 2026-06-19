@@ -4,7 +4,7 @@ import React, { useState, useEffect, Suspense } from 'react';
 import { DateField } from '@/app/components/ui/DateField';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { User, Phone, Mail, Calendar, MapPin, Loader2, CheckCircle, ArrowLeft, Building2 } from 'lucide-react';
+import { User, Phone, Mail, Calendar, MapPin, Loader2, CheckCircle, ArrowLeft, Building2, Mic } from 'lucide-react';
 
 type Org = { id: string; name: string; slug: string; address: string | null };
 
@@ -19,6 +19,7 @@ function RegisterForm() {
     const [orgsLoading, setOrgsLoading] = useState(true);
     const [success, setSuccess] = useState<{ patient_id: string; setup_link: string | null } | null>(null);
     const [error, setError] = useState('');
+    const [showManualForm, setShowManualForm] = useState(false);
 
     const [form, setForm] = useState({
         full_name: '', phone: '', email: '', age: '', gender: 'Male',
@@ -103,6 +104,50 @@ function RegisterForm() {
                     <ArrowLeft className="w-4 h-4" /> Back to Login
                 </Link>
 
+                {/* ─── Entry Choice: Manual vs Voice ─── */}
+                {!showManualForm && (
+                    <div className="bg-white rounded-3xl shadow-xl overflow-hidden mb-6">
+                        <div className="bg-gradient-to-r from-emerald-500 to-teal-600 px-8 py-8 text-white text-center">
+                            <h1 className="text-2xl font-black">Create Patient Account</h1>
+                            <p className="text-emerald-100 text-sm mt-1">Choose how you would like to register</p>
+                        </div>
+                        <div className="p-8 space-y-4">
+                            <button
+                                onClick={() => setShowManualForm(true)}
+                                className="w-full py-5 px-6 border-2 border-gray-200 rounded-2xl hover:border-emerald-400 hover:bg-emerald-50/50 transition-all flex items-center gap-4 group text-left"
+                            >
+                                <div className="w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center shrink-0">
+                                    <User className="w-6 h-6 text-emerald-600" />
+                                </div>
+                                <div>
+                                    <span className="font-bold text-gray-800 group-hover:text-emerald-700 text-lg block">Fill Manually</span>
+                                    <p className="text-sm text-gray-500">Type your details into the registration form</p>
+                                </div>
+                            </button>
+                            <button
+                                onClick={() => router.push('/patient/register/voice')}
+                                className="w-full py-5 px-6 border-2 border-gray-200 rounded-2xl hover:border-emerald-400 hover:bg-emerald-50/50 transition-all flex items-center gap-4 group text-left"
+                            >
+                                <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center shrink-0">
+                                    <Mic className="w-6 h-6 text-blue-600" />
+                                </div>
+                                <div>
+                                    <span className="font-bold text-gray-800 group-hover:text-emerald-700 text-lg block">Register with AI Voice Assistant</span>
+                                    <p className="text-sm text-gray-500">Speak your details — the assistant fills the form for you</p>
+                                </div>
+                            </button>
+                            <p className="text-center text-sm text-gray-500 pt-2">
+                                Already have an account?{' '}
+                                <Link href="/patient/login" className="text-emerald-600 font-bold hover:underline">
+                                    Sign In
+                                </Link>
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {/* ─── Manual Registration Form (unchanged) ─── */}
+                {showManualForm && (
                 <div className="bg-white rounded-3xl shadow-xl overflow-hidden">
                     <div className="bg-gradient-to-r from-emerald-500 to-teal-600 px-8 py-8 text-white">
                         <h1 className="text-2xl font-black">Create Patient Account</h1>
@@ -293,6 +338,7 @@ function RegisterForm() {
                         </p>
                     </form>
                 </div>
+                )}
             </div>
         </div>
     );
