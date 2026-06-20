@@ -134,12 +134,18 @@ export async function proxy(request: NextRequest) {
 
   // 2. Patient portal — separate auth
   if (pathname.startsWith("/patient")) {
+    // Add this safety redirect for the bare '/patient' route
+    if (pathname === "/patient") {
+      return NextResponse.redirect(new URL("/patient/dashboard", request.url));
+    }
+
     const isPatientAuthPage =
       pathname.startsWith("/patient/login") ||
       pathname.startsWith("/patient/setup-password") ||
       pathname.startsWith("/patient/forgot-password") ||
       pathname.startsWith("/patient/register") ||
       pathname.startsWith("/patient/organisations");
+
     // Allow public assessment pages without auth
     if (pathname.startsWith("/patient/assessment/")) {
       return NextResponse.next();
