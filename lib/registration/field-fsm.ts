@@ -5,6 +5,7 @@ import type { LanguageCode } from '@/lib/contracts/voice';
 import type { VoiceSession } from '@/lib/contracts/voice';
 import {
   FIELD_ORDER,
+  VOICE_FIELD_ORDER,
   validateField,
   deriveAgeFromDOB,
   isSkipIntent,
@@ -139,6 +140,8 @@ export class RegistrationFSM {
 
   abort() {
     this.aborted = true;
+    // Immediately stop any in-progress speech
+    import('@/lib/voice/tts').then(m => m.stopSpeaking());
   }
 
   private update(partial: Partial<FSMContext>) {
@@ -151,6 +154,7 @@ export class RegistrationFSM {
   }
 
   private async speak(text: string) {
+    if (this.aborted) return; // Don't speak if aborted
     this.log('assistant', text);
     this.update({ isSpeaking: true });
     await this.session.speak(text);
@@ -166,7 +170,7 @@ export class RegistrationFSM {
   }
 
   private getCurrentField(): FieldSpec | undefined {
-    return FIELD_ORDER[this.ctx.currentFieldIndex];
+    return VOICE_FIELD_ORDER[this.ctx.currentFieldIndex];
   }
 
   // ─── Main Flow ─────────────────────────────────────────────────────────────
@@ -209,7 +213,7 @@ export class RegistrationFSM {
   }
 
   private async collectFields() {
-    while (this.ctx.currentFieldIndex < FIELD_ORDER.length && !this.aborted) {
+    while (this.ctx.currentFieldIndex < VOICE_FIELD_ORDER.length && !this.aborted) {
       const field = this.getCurrentField()!;
 
       // Skip age if it was already autofilled by date of birth
@@ -235,10 +239,6 @@ export class RegistrationFSM {
           const ageYears = Math.floor((Date.now() - date.getTime()) / (365.25 * 24 * 3600 * 1000));
           this.ctx.formData.age = ageYears.toString();
           this.update({ formData: { ...this.ctx.formData } });
-          
-          // Speak the derived age to the user for confirmation
-          const prompts = getPrompts(this.session.language);
-          await this.speak(prompts.derivedAge(ageYears.toString(), this.ctx.formData.date_of_birth));
         }
       }
 
@@ -388,7 +388,7 @@ export class RegistrationFSM {
 
   private async savePatient() {
     // Validate required fields before attempting to save
-    const missingRequired = FIELD_ORDER.filter(f => !f.skippable && !this.ctx.formData[f.name]);
+    const missingRequired = VOICE_FIELD_ORDER.filter(f => !f.skippable && !this.ctx.formData[f.name]);
     if (missingRequired.length > 0) {
       const msg = this.session.language === 'hi'
         ? 'कुछ आवश्यक फ़ील्ड छूट गए हैं। कृपया उन्हें सबमिट करने के लिए स्क्रीन पर भरें।'

@@ -14,6 +14,26 @@ export function isTTSSupported(): boolean {
 // Global AudioContext for Web Audio API playback
 let audioCtx: AudioContext | null = null;
 
+// ─── Auto-stop speech on page leave / reload ─────────────────────────────────
+if (typeof window !== 'undefined') {
+  // Fires on reload, tab close, navigating away
+  window.addEventListener('beforeunload', () => {
+    stopSpeaking();
+  });
+
+  // Fires when user switches tabs or minimizes
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopSpeaking();
+    }
+  });
+
+  // Next.js client-side navigation fires popstate
+  window.addEventListener('popstate', () => {
+    stopSpeaking();
+  });
+}
+
 export function unlockAudio() {
   if (typeof window !== 'undefined') {
     if (!audioCtx) {
@@ -69,8 +89,50 @@ export async function speakText(
 
       if (res.ok) {
         const data = await res.json();
-        if (data.audios && data.audios[0]) {
+        if (data.audios && data.audios.length > 0) {
           
+          const isGoogleTTS = data.provider === 'google-tts';
+
+          // ── Google TTS returns MP3 → use HTMLAudioElement (handles MP3 natively)
+          if (isGoogleTTS) {
+            try {
+              const playChunksViaAudio = (chunks: string[], index: number): Promise<void> => {
+                return new Promise((done) => {
+                  if (index >= chunks.length || currentAbortController?.signal.aborted) {
+                    done();
+                    return;
+                  }
+
+                  const audio = new Audio(`data:audio/mpeg;base64,${chunks[index]}`);
+                  (window as any)._currentAudio = audio;
+                  audio.onended = () => {
+                    (window as any)._currentAudio = null;
+                    playChunksViaAudio(chunks, index + 1).then(done);
+                  };
+                  audio.onerror = (e) => {
+                    console.warn('[TTS] Audio element playback error:', e);
+                    (window as any)._currentAudio = null;
+                    done(); // Skip this chunk
+                  };
+                  audio.play().catch((e) => {
+                    console.warn('[TTS] Audio.play() rejected:', e);
+                    done();
+                  });
+                });
+              };
+
+              console.log(`[TTS] Playing ${data.audios.length} chunk(s) via Audio element (Google TTS)`);
+              await playChunksViaAudio(data.audios, 0);
+              resolve();
+              return;
+            } catch (playErr) {
+              console.warn('[TTS] Google TTS Audio element failed:', playErr);
+              fallbackSpeak(text, language, resolve);
+              return;
+            }
+          }
+
+          // ── Sarvam returns WAV → use Web Audio API (decodeAudioData)
           if (!audioCtx) unlockAudio();
           
           if (audioCtx) {
@@ -79,21 +141,37 @@ export async function speakText(
             }
 
             try {
-              const arrayBuffer = base64ToArrayBuffer(data.audios[0]);
-              const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-              
-              const source = audioCtx.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(audioCtx.destination);
-              
-              (window as any)._currentAudioSource = source;
-              
-              source.onended = () => {
-                (window as any)._currentAudioSource = null;
-                resolve();
+              // Play array of base64 audio chunks sequentially
+              const playNext = (index: number): Promise<void> => {
+                return new Promise((done) => {
+                  if (index >= data.audios.length || currentAbortController?.signal.aborted) {
+                    done();
+                    return;
+                  }
+
+                  const arrayBuffer = base64ToArrayBuffer(data.audios[index]);
+                  audioCtx!.decodeAudioData(arrayBuffer).then((audioBuffer) => {
+                    const source = audioCtx!.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioCtx!.destination);
+                    
+                    (window as any)._currentAudioSource = source;
+                    
+                    source.onended = () => {
+                      (window as any)._currentAudioSource = null;
+                      playNext(index + 1).then(done);
+                    };
+                    
+                    source.start(0);
+                  }).catch((decodeErr) => {
+                    console.warn('[TTS] decodeAudioData failed:', decodeErr);
+                    done();
+                  });
+                });
               };
-              
-              source.start(0);
+
+              await playNext(0);
+              resolve();
               return; // Success!
 
             } catch (playErr) {
@@ -105,7 +183,7 @@ export async function speakText(
         }
       } else {
         const errText = await res.text();
-        console.warn(`[TTS] Sarvam API returned error ${res.status}:`, errText);
+        console.warn(`[TTS] API returned error ${res.status}:`, errText);
       }
       
       // Fallback if API returned error or no audio
@@ -117,30 +195,18 @@ export async function speakText(
         resolve();
         return;
       }
-      console.warn('[TTS] Sarvam API or playback failed, using fallback:', err);
+      console.warn('[TTS] API or playback failed, using fallback:', err);
       fallbackSpeak(text, language, resolve);
     }
   });
 }
 
-function fallbackSpeak(text: string, language: LanguageCode, resolve: () => void) {
-  if (!isTTSSupported()) {
-    console.warn('[TTS] SpeechSynthesis not supported, text:', text);
-    resolve();
-    return;
-  }
-
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = TTS_LANG_MAP[language] || 'en-IN';
-  utterance.rate = 0.95;
-  utterance.pitch = 1;
-  utterance.volume = 1;
-
+function findBestVoice(language: LanguageCode): SpeechSynthesisVoice | null {
   const voices = window.speechSynthesis.getVoices();
-  const langCode = TTS_LANG_MAP[language];
-  
-  // Try to find a female voice for the target language
+  const langCode = TTS_LANG_MAP[language] || 'en-IN';
   const targetLangPrefix = langCode.split('-')[0];
+
+  // Try to find a female voice for the target language
   const femaleVoice = voices.find(v => 
     v.lang.startsWith(targetLangPrefix) && 
     (v.name.toLowerCase().includes('female') || 
@@ -150,29 +216,87 @@ function fallbackSpeak(text: string, language: LanguageCode, resolve: () => void
      v.name.toLowerCase().includes('lekha') || 
      v.name.toLowerCase().includes('aditi'))
   );
-  
-  if (femaleVoice) {
-    utterance.voice = femaleVoice;
-  } else {
-    // Fallback to the first available voice for that language
-    const preferredVoice = voices.find(
-      v => v.lang === langCode || v.lang.startsWith(targetLangPrefix)
-    );
-    if (preferredVoice) utterance.voice = preferredVoice;
+  if (femaleVoice) return femaleVoice;
+
+  // Fallback to any voice for that language
+  const langVoice = voices.find(
+    v => v.lang === langCode || v.lang.startsWith(targetLangPrefix)
+  );
+  if (langVoice) return langVoice;
+
+  // For Hindi: also try 'hi' prefix since some browsers use 'hi' not 'hi-IN'
+  if (language === 'hi') {
+    const hiVoice = voices.find(v => v.lang.startsWith('hi'));
+    if (hiVoice) return hiVoice;
   }
 
-  utterance.onend = () => resolve();
-  utterance.onerror = () => resolve();
+  return null;
+}
 
-  const MAX_CHUNK = 200;
-  if (text.length > MAX_CHUNK) {
-    const chunks = splitIntoChunks(text, MAX_CHUNK);
-    speakChunks(chunks, language).then(resolve);
+function fallbackSpeak(text: string, language: LanguageCode, resolve: () => void) {
+  if (!isTTSSupported()) {
+    console.warn('[TTS] SpeechSynthesis not supported, text:', text);
+    resolve();
     return;
   }
 
-  window.speechSynthesis.speak(utterance);
-  setTimeout(() => resolve(), Math.max(text.length * 80, 5000));
+  const langCode = TTS_LANG_MAP[language] || 'en-IN';
+  let resolved = false;
+  const safeResolve = () => { if (!resolved) { resolved = true; resolve(); } };
+
+  const doSpeak = () => {
+    // Stop any queued speech first
+    window.speechSynthesis.cancel();
+
+    const MAX_CHUNK = 200;
+    if (text.length > MAX_CHUNK) {
+      const chunks = splitIntoChunks(text, MAX_CHUNK);
+      speakChunks(chunks, language).then(safeResolve);
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = langCode;
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    const voice = findBestVoice(language);
+    if (voice) {
+      utterance.voice = voice;
+      console.log(`[TTS] Browser fallback using voice: ${voice.name} (${voice.lang})`);
+    } else {
+      console.warn(`[TTS] No voice found for ${langCode}, using default`);
+    }
+
+    utterance.onend = safeResolve;
+    utterance.onerror = (e) => {
+      console.warn('[TTS] Browser SpeechSynthesis error:', e);
+      safeResolve();
+    };
+
+    window.speechSynthesis.speak(utterance);
+
+    // Safety timeout — some browsers never fire onend
+    setTimeout(safeResolve, Math.max(text.length * 80, 5000));
+  };
+
+  // Voices might not be loaded yet — wait for them
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length > 0) {
+    doSpeak();
+  } else {
+    // Some browsers load voices async — wait up to 1s
+    const handler = () => {
+      window.speechSynthesis.onvoiceschanged = null;
+      doSpeak();
+    };
+    window.speechSynthesis.onvoiceschanged = handler;
+    setTimeout(() => {
+      window.speechSynthesis.onvoiceschanged = null;
+      doSpeak();
+    }, 1000);
+  }
 }
 
 function splitIntoChunks(text: string, maxLen: number): string[] {

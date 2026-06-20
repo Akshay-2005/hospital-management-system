@@ -298,14 +298,21 @@ export default function VoiceRegistrationPage() {
             </p>
           </div>
           
-          {registrationResult?.setupLink && (
-            <a
-              href={registrationResult.setupLink}
-              className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm"
-            >
-              Set Your Password →
-            </a>
-          )}
+          {registrationResult?.setupLink && (() => {
+            // Rebuild as a relative path so it goes to the current host, not whatever
+            // APP_BASE_URL is set to (which may point to Vercel in local dev).
+            let token = '';
+            try { token = new URL(registrationResult.setupLink).searchParams.get('token') ?? ''; } catch {}
+            const localPath = `/patient/setup-password?token=${token}`;
+            return (
+              <Link
+                href={localPath}
+                className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm"
+              >
+                Set Your Password →
+              </Link>
+            );
+          })()}
           
           <Link
             href="/patient/login"
