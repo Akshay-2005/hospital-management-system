@@ -17,16 +17,17 @@ export const metadata = {
 };
 
 export default async function VoiceBookingPage() {
-  const org = await prisma.organization.findFirst({
-    where: { is_active: true }
-  });
-  
-  const orgId = org?.id || 'org-avani-default';
   const session = await getPatientSession();
-  
+
+  // Prefer the org from the patient's own session — they registered there.
+  // Fall back to findFirst only when no session exists (e.g. direct dev access).
+  const orgId = session?.organization_id || (
+    await prisma.organization.findFirst({ where: { is_active: true } })
+  )?.id || '';
+
   return (
-    <VoiceBookingClient 
-      initialOrgId={orgId} 
+    <VoiceBookingClient
+      initialOrgId={orgId}
       sessionPatientId={session?.id}
       sessionPatientName={session?.name}
     />
