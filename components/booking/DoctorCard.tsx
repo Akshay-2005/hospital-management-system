@@ -131,7 +131,7 @@ export function DoctorCard({
           'text-lg font-bold leading-tight truncate',
           isSelected ? 'text-blue-900' : 'text-gray-900',
         ].join(' ')}>
-          Dr. {doctor.name}
+          {doctor.name.toLowerCase().startsWith('dr') ? doctor.name : `Dr. ${doctor.name}`}
         </p>
       </div>
 

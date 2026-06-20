@@ -40,6 +40,8 @@ import type {
   AppointmentCreationResult,
 } from '@/lib/contracts/voice';
 
+import { createVoiceSession } from '@/lib/voice/session';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Step enum — the canonical booking flow
@@ -50,6 +52,7 @@ type BookingStep =
   | 'symptoms'        // Step 3 — capture symptoms via voice
   | 'low_confidence'  // Step 3 — NLU not sure; show department picker + ask to clarify
   | 'doctors'         // Step 4 — display + select doctor
+  | 'date'            // Step 4.5 — select date
   | 'slots'           // Step 5 — display + select slot
   | 'confirming'      // Step 6 — booking in flight (spinner)
   | 'confirmed'       // Step 6 — booking complete (success card)
@@ -112,6 +115,8 @@ type BookingAction =
   | { type: 'LOW_CONFIDENCE_DETECTED'; availableSpecialties: string[]; reasoning: string; symptomText: string }
   | { type: 'DOCTORS_LOADED'; doctors: DoctorCard[] }
   | { type: 'DOCTOR_SELECTED'; doctor: DoctorCard }
+  | { type: 'DATE_STEP_START' }
+  | { type: 'DATE_SELECTED'; date: string }
   | { type: 'LOADING_SLOTS'; doctorId: string }
   | { type: 'SLOTS_LOADED'; slots: SlotCard[]; date: string; nextAvailableDate?: string | null }
   | { type: 'SLOT_SELECTED'; slot: SlotCard }
@@ -204,6 +209,19 @@ function bookingReducer(state: BookingState, action: BookingAction): BookingStat
         selectedDoctor: action.doctor,
       };
 
+    case 'DATE_STEP_START':
+      return {
+        ...state,
+        step: 'date',
+        voiceState: 'idle',
+      };
+
+    case 'DATE_SELECTED':
+      return {
+        ...state,
+        slotDate: action.date,
+      };
+
     case 'LOADING_SLOTS':
       return {
         ...state,
@@ -268,85 +286,6 @@ function bookingReducer(state: BookingState, action: BookingAction): BookingStat
 // This mock is deleted when Track A hands over the real VoiceSession.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function createMockVoiceSession(
-  language: string,
-  onInterimTranscript: (text: string) => void,
-): VoiceSession & { stopListening?: () => void; startListening?: () => void; isWaitingForTap?: () => boolean; resolveListen?: (text: string) => void } {
-  // In-memory key-value store for session data (VoiceSession.get / .set)
-  const sessionStore: Record<string, unknown> = {};
-
-  let currentResolve: ((res: { text: string; confidence: number }) => void) | null = null;
-  let triggerStart: (() => void) | null = null;
-
-  return {
-    language: language as 'en' | 'hi',
-
-    stopListening() {
-      if (currentResolve) {
-        currentResolve({ text: '', confidence: 0 });
-        currentResolve = null;
-      }
-    },
-
-    startListening() {
-      if (triggerStart) {
-        triggerStart();
-        triggerStart = null;
-      }
-    },
-
-    isWaitingForTap() {
-      return triggerStart !== null;
-    },
-
-    resolveListen(text: string) {
-      if (currentResolve) {
-        onInterimTranscript(text);
-        currentResolve({ text, confidence: 1 });
-        currentResolve = null;
-      }
-    },
-
-    listen(): Promise<{ text: string; confidence: number }> {
-      return new Promise((resolve) => {
-        triggerStart = () => {
-          currentResolve = resolve;
-        };
-      });
-    },
-
-    speak(text: string): Promise<void> {
-      return new Promise((resolve) => {
-        if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-          // SSR or unsupported — resolve immediately
-          resolve();
-          return;
-        }
-        // Cancel any ongoing speech before starting new
-        window.speechSynthesis.cancel();
-
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = language === 'hi' ? 'hi-IN' : 'en-IN';
-        utterance.rate = 0.9;   // Slightly slower for clarity
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-
-        utterance.onend = () => resolve();
-        utterance.onerror = () => resolve(); // Silently resolve on TTS errors
-
-        window.speechSynthesis.speak(utterance);
-      });
-    },
-
-    get<T>(key: string): T | undefined {
-      return sessionStore[key] as T | undefined;
-    },
-
-    set<T>(key: string, value: T): void {
-      sessionStore[key] = value;
-    },
-  };
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility: get tomorrow's date as YYYY-MM-DD
@@ -391,16 +330,24 @@ const STEP_LABELS: Partial<Record<BookingStep, string>> = {
 // Inner page (uses useSearchParams — must be wrapped in Suspense)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
+function VoiceBookingPageInner({
+  initialOrgId,
+  sessionPatientId,
+  sessionPatientName,
+}: {
+  initialOrgId?: string;
+  sessionPatientId?: string;
+  sessionPatientName?: string;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
   // ── Resolve RegistrationResult: URL params ──────────────
   const registration = useMemo<RegistrationResult | null>(() => {
-    const patientId = searchParams.get('patientId');
+    const patientId = searchParams.get('patientId') || sessionPatientId;
     const organisationId = searchParams.get('organisationId') || searchParams.get('orgId') || initialOrgId;
     const language = searchParams.get('language') as 'en' | 'hi' | null;
-    const patientName = searchParams.get('patientName') || searchParams.get('name');
+    const patientName = searchParams.get('patientName') || searchParams.get('name') || sessionPatientName;
 
     if (patientId && organisationId) {
       return {
@@ -441,12 +388,12 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
     dispatch({ type: 'SET_TRANSCRIPT', transcript: text });
   }, []);
 
-  // Initialise session after mount (SSR-safe)
+  // ── Initialize Real Voice Session ─────────────
   useEffect(() => {
     if (typeof window !== 'undefined' && !voiceSessionRef.current) {
-      voiceSessionRef.current = createMockVoiceSession(registration.language, handleInterimTranscript);
+      voiceSessionRef.current = createVoiceSession(registration.language);
     }
-  }, [registration.language, handleInterimTranscript]);
+  }, [registration.language]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Helper: speak + update state
@@ -455,12 +402,17 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
   const speak = useCallback(async (text: string) => {
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'speaking', spokenText: text });
     await voiceSessionRef.current?.speak(text);
+    // After speaking, reset to idle so the UI becomes interactive
+    dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
   }, []);
 
   const listen = useCallback(async (): Promise<{ text: string; confidence: number }> => {
-    dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle', transcript: '' });
+    dispatch({ type: 'SET_VOICE_STATE', voiceState: 'listening', transcript: '' });
+    
+    // Call the real Sarvam API engine
     const result = await voiceSessionRef.current?.listen() ?? { text: '', confidence: 0 };
-    dispatch({ type: 'SET_VOICE_STATE', voiceState: 'thinking' });
+    
+    dispatch({ type: 'SET_VOICE_STATE', voiceState: 'thinking', transcript: result.text });
     return result;
   }, []);
 
@@ -628,14 +580,17 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
   function parseVoiceDoctorChoice(text: string, doctors: DoctorCard[]): DoctorCard | null {
     if (!text) return null;
     const lower = text.toLowerCase();
-    // Check for doctor name mention
+    // Check for doctor name mention (ignore "Dr.")
     for (const doc of doctors) {
-      if (lower.includes(doc.name.toLowerCase())) return doc;
+      const docName = doc.name.toLowerCase().replace(/dr\.?\s*/g, '');
+      if (lower.includes(docName)) return doc;
     }
     // Check for ordinal / number
     const ordinals = ['first', 'second', 'third', 'fourth', 'fifth'];
+    const cardinals = ['one', 'two', 'three', 'four', 'five'];
     for (let i = 0; i < ordinals.length; i++) {
-      if (lower.includes(ordinals[i]) || lower.includes(String(i + 1))) {
+      const cardinalRegex = new RegExp(`\\b${cardinals[i]}\\b`);
+      if (lower.includes(ordinals[i]) || lower.includes(String(i + 1)) || cardinalRegex.test(lower)) {
         return doctors[i] ?? null;
       }
     }
@@ -644,13 +599,65 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
 
   const handleDoctorSelected = useCallback(async (doctor: DoctorCard) => {
     dispatch({ type: 'DOCTOR_SELECTED', doctor });
+    dispatch({ type: 'DATE_STEP_START' });
+
+    await speak(`Great choice! Dr. ${doctor.name}. What date would you like to book? For example, today or tomorrow.`);
+
+    await runDateStep(doctor);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speak]);
+
+  function parseVoiceDateChoice(text: string): string | null {
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const dayAfter = new Date(today);
+    dayAfter.setDate(dayAfter.getDate() + 2);
+
+    const formatDate = (d: Date) => {
+      const offset = d.getTimezoneOffset() * 60000;
+      return (new Date(d.getTime() - offset)).toISOString().split('T')[0];
+    };
+
+    if (lower.includes('today')) return formatDate(today);
+    if (lower.includes('tomorrow')) return formatDate(tomorrow);
+    if (lower.includes('day after tomorrow')) return formatDate(dayAfter);
+
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    for (let i = 0; i < days.length; i++) {
+      if (lower.includes(days[i])) {
+        const d = new Date(today);
+        d.setDate(d.getDate() + ((i + 7 - d.getDay()) % 7 || 7));
+        return formatDate(d);
+      }
+    }
+    return null;
+  }
+
+  const runDateStep = useCallback(async (doctor: DoctorCard) => {
+    const { text: voiceChoice } = await listen();
+    const chosenDate = parseVoiceDateChoice(voiceChoice);
+
+    if (chosenDate) {
+      await handleDateSelected(doctor, chosenDate);
+    } else {
+      dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
+      await speak('Please tap a date or say today or tomorrow.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listen, speak]);
+
+  const handleDateSelected = useCallback(async (doctor: DoctorCard, date: string) => {
+    dispatch({ type: 'DATE_SELECTED', date });
     dispatch({ type: 'LOADING_SLOTS', doctorId: doctor.id });
 
-    await speak(`Great choice! Dr. ${doctor.name}. Let me check available slots.`);
+    const d = new Date(date);
+    const friendlyDate = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+    await speak(`Got it, ${friendlyDate}. Let me check available slots.`);
 
-    // Default: start with tomorrow's date
-    const dateStr = getTomorrowDateStr();
-    await runSlotStep(doctor, dateStr);
+    await runSlotStep(doctor, date);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speak]);
 
@@ -720,8 +727,10 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
     if (!text) return null;
     const lower = text.toLowerCase();
     const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth'];
+    const cardinals = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
     for (let i = 0; i < ordinals.length; i++) {
-      if (lower.includes(ordinals[i]) || lower.includes(String(i + 1))) {
+      const cardinalRegex = new RegExp(`\\b${cardinals[i]}\\b`);
+      if (lower.includes(ordinals[i]) || lower.includes(String(i + 1)) || cardinalRegex.test(lower)) {
         return slots[i] ?? null;
       }
     }
@@ -911,34 +920,7 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
             onMicPress={handleMicPress}
             disabled={state.voiceState === 'thinking' || state.voiceState === 'speaking'}
           />
-          {state.voiceState === 'listening' && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const fd = new FormData(e.currentTarget);
-                const text = fd.get('simulatedSpeech') as string;
-                if (!text.trim()) return;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                (voiceSessionRef.current as any)?.resolveListen?.(text);
-                e.currentTarget.reset();
-              }}
-              className="mt-4 flex gap-2"
-            >
-              <input
-                autoFocus
-                name="simulatedSpeech"
-                type="text"
-                placeholder="Simulate your voice response here..."
-                className="flex-1 rounded-xl border border-gray-300 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                type="submit"
-                className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition shadow-sm shadow-blue-600/20"
-              >
-                Send
-              </button>
-            </form>
-          )}
+
         </section>
 
         {/* ── WELCOME SCREEN ────────────────────────────────────────────────── */}
@@ -1137,6 +1119,44 @@ function VoiceBookingPageInner({ initialOrgId }: { initialOrgId?: string }) {
           </section>
         )}
 
+        {/* ── DATE SELECTION STEP ──────────────────────────────────────────── */}
+        {(state.step === 'date' || state.step === 'slots') && (
+          <section aria-label="Date selection" className="space-y-3">
+            <h2 className="text-sm font-bold text-gray-700">Step 4.5 — Pick a Date</h2>
+            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+              {Array.from({ length: 7 }).map((_, i) => {
+                const d = new Date();
+                d.setDate(d.getDate() + i);
+                const offset = d.getTimezoneOffset() * 60000;
+                const dateStr = (new Date(d.getTime() - offset)).toISOString().split('T')[0];
+                const isSelected = state.slotDate === dateStr;
+                const isDisabled = state.voiceState === 'thinking' || state.voiceState === 'speaking' || state.step === 'slots';
+                return (
+                  <button
+                    key={dateStr}
+                    type="button"
+                    onClick={() => {
+                        if (!isDisabled && state.selectedDoctor) {
+                            handleDateSelected(state.selectedDoctor, dateStr);
+                        }
+                    }}
+                    disabled={isDisabled}
+                    className={`flex-shrink-0 flex flex-col items-center justify-center w-20 h-20 rounded-2xl border-2 transition-all ${
+                        isSelected 
+                            ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-md' 
+                            : 'border-gray-200 bg-white hover:border-blue-300 text-gray-600'
+                    } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <span className="text-xs font-bold uppercase">{d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
+                    <span className="text-xl font-black mt-0.5">{d.getDate()}</span>
+                    <span className="text-[10px] font-semibold mt-0.5 opacity-80">{d.toLocaleDateString('en-US', { month: 'short' })}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {/* ── SLOT SELECTION STEP ───────────────────────────────────────────── */}
         {state.step === 'slots' && (
           <section aria-label="Slot selection" className="space-y-3">
@@ -1265,7 +1285,15 @@ function formatDateSpoken(iso: string): string {
 // Page export — wrapped in Suspense (required for useSearchParams in Next.js)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function VoiceBookingClient({ initialOrgId }: { initialOrgId?: string }) {
+export default function VoiceBookingClient({
+  initialOrgId,
+  sessionPatientId,
+  sessionPatientName,
+}: {
+  initialOrgId?: string;
+  sessionPatientId?: string;
+  sessionPatientName?: string;
+}) {
   return (
     <Suspense
       fallback={
@@ -1277,7 +1305,11 @@ export default function VoiceBookingClient({ initialOrgId }: { initialOrgId?: st
         </div>
       }
     >
-      <VoiceBookingPageInner initialOrgId={initialOrgId} />
+      <VoiceBookingPageInner 
+        initialOrgId={initialOrgId} 
+        sessionPatientId={sessionPatientId}
+        sessionPatientName={sessionPatientName}
+      />
     </Suspense>
   );
 }

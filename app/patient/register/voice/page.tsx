@@ -300,7 +300,7 @@ export default function VoiceRegistrationPage() {
           
           {registrationResult?.setupLink && (
             <a
-              href={registrationResult.setupLink}
+              href={`${registrationResult.setupLink}&redirectTo=/patient/appointments/choose-method`}
               className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm"
             >
               Set Your Password →

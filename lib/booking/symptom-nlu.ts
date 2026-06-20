@@ -77,38 +77,74 @@ function detectRedFlagsLocally(symptomText: string): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GPT-4o call (mirrors app/lib/ai-service.ts pattern)
+// Gemini Flash call (Google AI Studio)
 // ─────────────────────────────────────────────────────────────────────────────
-const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
-async function callGPT4o(systemPrompt: string, userPrompt: string): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
+async function callGeminiFlash(systemPrompt: string, userPrompt: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
-  const response = await fetch(OPENAI_API_URL, {
+  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
+      system_instruction: {
+        parts: [{ text: systemPrompt }]
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: userPrompt }]
+        }
       ],
-      temperature: 0.2, // Low temperature for consistent medical routing
-      max_tokens: 400,
+      generationConfig: {
+        temperature: 0.2, // Low temperature for consistent medical routing
+        maxOutputTokens: 1024,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            specialties: {
+              type: "ARRAY",
+              items: { type: "STRING" },
+            },
+            isEmergency: {
+              type: "BOOLEAN",
+            },
+            redFlags: {
+              type: "ARRAY",
+              items: { type: "STRING" },
+            },
+            confidence: {
+              type: "NUMBER",
+            },
+            reasoning: {
+              type: "STRING",
+            },
+          },
+          required: ["specialties", "isEmergency", "redFlags", "confidence", "reasoning"],
+        },
+      }
     }),
   });
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`OpenAI API error: ${response.status} — ${err}`);
+    throw new Error(`Gemini API error: ${response.status} — ${err}`);
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || '';
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  
+  if (!text) {
+    console.error("[SymptomNLU] Gemini returned empty text. Raw response:", JSON.stringify(data, null, 2));
+    throw new Error("Gemini returned empty response.");
+  }
+  
+  return text;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,11 +204,18 @@ export async function analyseSymptoms(symptomText: string): Promise<SymptomNLURe
 
   // ─── Step 2: LLM analysis ──────────────────────────────────────────────────
   try {
-    const raw = await callGPT4o(buildSystemPrompt(), `Patient symptoms: "${symptomText}"`);
+    const raw = await callGeminiFlash(buildSystemPrompt(), `Patient symptoms: "${symptomText}"`);
 
     // Strip any accidental markdown wrapping
-    const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(cleaned);
+    const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    
+    let parsed: any;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseError) {
+      console.error('[SymptomNLU] JSON Parse Error. Raw string that failed to parse:', JSON.stringify(cleaned));
+      throw parseError;
+    }
 
     // Sanitise: only keep specialties that exist in our reference map
     const validatedSpecialties: string[] = (parsed.specialties || [])

@@ -9,6 +9,7 @@
 
 import { prisma } from '@/backend/db';
 import VoiceBookingClient from './VoiceBookingClient';
+import { getPatientSession } from '@/app/lib/session';
 
 export const metadata = {
   title: 'AI Voice Booking | HospitalOS',
@@ -21,6 +22,13 @@ export default async function VoiceBookingPage() {
   });
   
   const orgId = org?.id || 'org-avani-default';
+  const session = await getPatientSession();
   
-  return <VoiceBookingClient initialOrgId={orgId} />;
+  return (
+    <VoiceBookingClient 
+      initialOrgId={orgId} 
+      sessionPatientId={session?.id}
+      sessionPatientName={session?.name}
+    />
+  );
 }
