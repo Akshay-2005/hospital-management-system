@@ -14,6 +14,7 @@
  * =====================================================================
  */
 
+import OpenAI from 'openai';
 import type { SymptomNLUResponse } from '@/lib/contracts/voice';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -23,7 +24,7 @@ import type { SymptomNLUResponse } from '@/lib/contracts/voice';
 export const SPECIALTY_REFERENCE: Record<string, string[]> = {
   'Cardiology':       ['chest pain', 'heart palpitation', 'shortness of breath', 'hypertension', 'high blood pressure', 'irregular heartbeat', 'heart attack', 'angina'],
   'Neurology':        ['headache', 'migraine', 'seizure', 'dizziness', 'memory loss', 'numbness', 'tingling', 'tremor', 'stroke', 'weakness', 'paralysis', 'epilepsy'],
-  'Orthopedics':      ['joint pain', 'bone pain', 'fracture', 'back pain', 'knee pain', 'shoulder pain', 'hip pain', 'arthritis', 'swollen joint', 'sports injury'],
+  'Orthopedics':      ['joint pain', 'bone pain', 'fracture', 'back pain', 'knee pain', 'shoulder pain', 'hip pain', 'arthritis', 'swollen joint', 'sports injury', 'leg pain', 'leg paining', 'muscle pain', 'muscle soreness', 'soreness', 'limb pain', 'arm pain', 'ankle pain', 'wrist pain', 'neck pain', 'spine pain', 'stiffness'],
   'Gastroenterology': ['stomach pain', 'abdominal pain', 'nausea', 'vomiting', 'diarrhea', 'constipation', 'bloating', 'indigestion', 'acid reflux', 'blood in stool', 'jaundice', 'liver problem'],
   'Pulmonology':      ['cough', 'wheezing', 'asthma', 'breathlessness', 'chest tightness', 'tuberculosis', 'lung problem', 'pneumonia', 'copd'],
   'Dermatology':      ['rash', 'skin problem', 'itching', 'acne', 'eczema', 'psoriasis', 'hair loss', 'nail problem', 'lesion', 'allergy'],
@@ -77,73 +78,30 @@ function detectRedFlagsLocally(symptomText: string): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Gemini Flash call (Google AI Studio)
+// Groq LLM call (via OpenAI-compatible SDK)
 // ─────────────────────────────────────────────────────────────────────────────
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+async function callGroq(systemPrompt: string, userPrompt: string): Promise<string> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not configured');
 
-async function callGeminiFlash(systemPrompt: string, userPrompt: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
-
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      system_instruction: {
-        parts: [{ text: systemPrompt }]
-      },
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: userPrompt }]
-        }
-      ],
-      generationConfig: {
-        temperature: 0.2, // Low temperature for consistent medical routing
-        maxOutputTokens: 1024,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            specialties: {
-              type: "ARRAY",
-              items: { type: "STRING" },
-            },
-            isEmergency: {
-              type: "BOOLEAN",
-            },
-            redFlags: {
-              type: "ARRAY",
-              items: { type: "STRING" },
-            },
-            confidence: {
-              type: "NUMBER",
-            },
-            reasoning: {
-              type: "STRING",
-            },
-          },
-          required: ["specialties", "isEmergency", "redFlags", "confidence", "reasoning"],
-        },
-      }
-    }),
+  const groq = new OpenAI({
+    apiKey,
+    baseURL: 'https://api.groq.com/openai/v1',
   });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Gemini API error: ${response.status} — ${err}`);
-  }
+  const response = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.2,
+    max_tokens: 1024,
+  });
 
-  const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  
-  if (!text) {
-    console.error("[SymptomNLU] Gemini returned empty text. Raw response:", JSON.stringify(data, null, 2));
-    throw new Error("Gemini returned empty response.");
-  }
-  
+  const text = response.choices[0]?.message?.content;
+  if (!text) throw new Error('Groq returned empty response.');
   return text;
 }
 
@@ -153,15 +111,24 @@ async function callGeminiFlash(systemPrompt: string, userPrompt: string): Promis
 // No clinical diagnosis — routing only.
 // ─────────────────────────────────────────────────────────────────────────────
 function buildSystemPrompt(): string {
+  const referenceLines = Object.entries(SPECIALTY_REFERENCE)
+    .map(([specialty, keywords]) => `  ${specialty}: ${keywords.join(', ')}`)
+    .join('\n');
+
   return `You are an AI medical triage assistant that maps patient-described symptoms to hospital specialties.
 
 IMPORTANT RULES:
 1. You NEVER diagnose. You only route to specialties.
 2. You MUST only use specialties from this exact list:
    ${VALID_SPECIALTIES.join(', ')}
-3. If symptoms match multiple specialties, list all relevant ones (primary first).
-4. Always assess for emergencies first.
-5. Return ONLY valid JSON — no markdown, no code blocks, no extra text.
+3. Use the symptom-to-specialty reference below to guide your routing. Match informal or colloquial descriptions (e.g. "leg is paining", "soreness") to the closest keywords.
+4. If symptoms match multiple specialties, list all relevant ones (primary first).
+5. Always assess for emergencies first.
+6. Return ONLY valid JSON — no markdown, no code blocks, no extra text.
+7. Set confidence >= 0.6 whenever the symptoms reasonably match at least one specialty, even if the phrasing is informal.
+
+SYMPTOM REFERENCE (use these to guide routing):
+${referenceLines}
 
 Return JSON in this exact format:
 {
@@ -172,7 +139,7 @@ Return JSON in this exact format:
   "reasoning": "One sentence explanation (max 20 words) suitable to be spoken to the patient"
 }
 
-If symptoms are very vague or unclear, set confidence below 0.5.
+If symptoms are truly too vague to route anywhere, set confidence below 0.5.
 If emergency detected, set isEmergency: true and describe the emergency in redFlags array.`;
 }
 
@@ -204,7 +171,7 @@ export async function analyseSymptoms(symptomText: string): Promise<SymptomNLURe
 
   // ─── Step 2: LLM analysis ──────────────────────────────────────────────────
   try {
-    const raw = await callGeminiFlash(buildSystemPrompt(), `Patient symptoms: "${symptomText}"`);
+    const raw = await callGroq(buildSystemPrompt(), `Patient symptoms: "${symptomText}"`);
 
     // Strip any accidental markdown wrapping
     const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();

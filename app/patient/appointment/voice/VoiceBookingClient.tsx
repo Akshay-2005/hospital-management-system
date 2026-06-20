@@ -304,8 +304,9 @@ function getTomorrowDateStr(): string {
 const STEP_MAP: Record<BookingStep, number> = {
   welcome: 1,
   symptoms: 2,
-  low_confidence: 2, // Still step 3 — clarification sub-step
+  low_confidence: 2,
   doctors: 3,
+  date: 4,
   slots: 4,
   confirming: 5,
   confirmed: 6,
@@ -601,7 +602,7 @@ function VoiceBookingPageInner({
     dispatch({ type: 'DOCTOR_SELECTED', doctor });
     dispatch({ type: 'DATE_STEP_START' });
 
-    await speak(`Great choice! Dr. ${doctor.name}. What date would you like to book? For example, today or tomorrow.`);
+    await speak(`Great choice! Dr. ${doctor.name}. What date would you like to book? You can say a specific date like 25 June, or say today or tomorrow.`);
 
     await runDateStep(doctor);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -609,22 +610,21 @@ function VoiceBookingPageInner({
 
   function parseVoiceDateChoice(text: string): string | null {
     if (!text) return null;
-    const lower = text.toLowerCase();
+    const lower = text.toLowerCase().trim();
     const today = new Date();
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const dayAfter = new Date(today);
-    dayAfter.setDate(dayAfter.getDate() + 2);
 
     const formatDate = (d: Date) => {
       const offset = d.getTimezoneOffset() * 60000;
       return (new Date(d.getTime() - offset)).toISOString().split('T')[0];
     };
 
+    // Relative keywords
     if (lower.includes('today')) return formatDate(today);
-    if (lower.includes('tomorrow')) return formatDate(tomorrow);
-    if (lower.includes('day after tomorrow')) return formatDate(dayAfter);
+    if (lower.includes('day after tomorrow')) return formatDate(new Date(today.getTime() + 2 * 86400000));
+    if (lower.includes('tomorrow')) return formatDate(new Date(today.getTime() + 86400000));
+    if (lower.includes('next week')) return formatDate(new Date(today.getTime() + 7 * 86400000));
 
+    // Weekday names → next occurrence
     const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     for (let i = 0; i < days.length; i++) {
       if (lower.includes(days[i])) {
@@ -633,6 +633,73 @@ function VoiceBookingPageInner({
         return formatDate(d);
       }
     }
+
+    // Month name map
+    const months: Record<string, number> = {
+      january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2,
+      april: 3, apr: 3, may: 4, june: 5, jun: 5, july: 6, jul: 6,
+      august: 7, aug: 7, september: 8, sep: 8, sept: 8,
+      october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11,
+    };
+
+    // Spoken ordinals / cardinals → day number
+    const wordDay: Record<string, number> = {
+      first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7,
+      eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13,
+      fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18,
+      nineteenth: 19, twentieth: 20,
+      'twenty first': 21, 'twenty-first': 21, 'twenty one': 21,
+      'twenty second': 22, 'twenty-second': 22, 'twenty two': 22,
+      'twenty third': 23, 'twenty-third': 23, 'twenty three': 23,
+      'twenty fourth': 24, 'twenty-fourth': 24, 'twenty four': 24,
+      'twenty fifth': 25, 'twenty-fifth': 25, 'twenty five': 25,
+      'twenty sixth': 26, 'twenty-sixth': 26, 'twenty six': 26,
+      'twenty seventh': 27, 'twenty-seventh': 27, 'twenty seven': 27,
+      'twenty eighth': 28, 'twenty-eighth': 28, 'twenty eight': 28,
+      'twenty ninth': 29, 'twenty-ninth': 29, 'twenty nine': 29,
+      thirtieth: 30, thirty: 30,
+      'thirty first': 31, 'thirty-first': 31, 'thirty one': 31,
+    };
+
+    // Find month in spoken text
+    let foundMonth: number | null = null;
+    for (const [word, num] of Object.entries(months)) {
+      if (lower.includes(word)) { foundMonth = num; break; }
+    }
+
+    if (foundMonth !== null) {
+      // Try numeric day first: "25 june", "june 25", "25th june"
+      const numMatch = lower.match(/\b(\d{1,2})\b/);
+      if (numMatch) {
+        const day = parseInt(numMatch[1], 10);
+        if (day >= 1 && day <= 31) {
+          const yr = today.getFullYear();
+          const d = new Date(yr, foundMonth, day);
+          if (d < today) d.setFullYear(yr + 1);
+          if (!isNaN(d.getTime())) return formatDate(d);
+        }
+      }
+      // Try spoken day: "twenty fifth june"
+      for (const [word, day] of Object.entries(wordDay)) {
+        if (lower.includes(word)) {
+          const yr = today.getFullYear();
+          const d = new Date(yr, foundMonth, day);
+          if (d < today) d.setFullYear(yr + 1);
+          if (!isNaN(d.getTime())) return formatDate(d);
+        }
+      }
+    }
+
+    // Numeric formats: "25/06", "25-06-2025"
+    const slashMatch = lower.match(/(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{4}))?/);
+    if (slashMatch) {
+      const day = parseInt(slashMatch[1], 10);
+      const month = parseInt(slashMatch[2], 10) - 1;
+      const year = slashMatch[3] ? parseInt(slashMatch[3], 10) : today.getFullYear();
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return formatDate(d);
+    }
+
     return null;
   }
 
@@ -644,7 +711,7 @@ function VoiceBookingPageInner({
       await handleDateSelected(doctor, chosenDate);
     } else {
       dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
-      await speak('Please tap a date or say today or tomorrow.');
+      await speak('I didn\'t catch that. Please say a date like 25 June, or pick one below.');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listen, speak]);
@@ -1123,36 +1190,48 @@ function VoiceBookingPageInner({
         {(state.step === 'date' || state.step === 'slots') && (
           <section aria-label="Date selection" className="space-y-3">
             <h2 className="text-sm font-bold text-gray-700">Step 4.5 — Pick a Date</h2>
-            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-              {Array.from({ length: 7 }).map((_, i) => {
-                const d = new Date();
-                d.setDate(d.getDate() + i);
-                const offset = d.getTimezoneOffset() * 60000;
-                const dateStr = (new Date(d.getTime() - offset)).toISOString().split('T')[0];
-                const isSelected = state.slotDate === dateStr;
-                const isDisabled = state.voiceState === 'thinking' || state.voiceState === 'speaking' || state.step === 'slots';
-                return (
-                  <button
-                    key={dateStr}
-                    type="button"
-                    onClick={() => {
-                        if (!isDisabled && state.selectedDoctor) {
-                            handleDateSelected(state.selectedDoctor, dateStr);
-                        }
-                    }}
-                    disabled={isDisabled}
-                    className={`flex-shrink-0 flex flex-col items-center justify-center w-20 h-20 rounded-2xl border-2 transition-all ${
-                        isSelected 
-                            ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-md' 
-                            : 'border-gray-200 bg-white hover:border-blue-300 text-gray-600'
-                    } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                  >
-                    <span className="text-xs font-bold uppercase">{d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
-                    <span className="text-xl font-black mt-0.5">{d.getDate()}</span>
-                    <span className="text-[10px] font-semibold mt-0.5 opacity-80">{d.toLocaleDateString('en-US', { month: 'short' })}</span>
-                  </button>
-                );
-              })}
+
+            {/* Date input — accepts any future date */}
+            <div className="space-y-2">
+              <input
+                type="date"
+                min={(() => { const d = new Date(); const o = d.getTimezoneOffset() * 60000; return new Date(d.getTime() - o).toISOString().split('T')[0]; })()}
+                value={state.slotDate || ''}
+                disabled={state.voiceState === 'thinking' || state.voiceState === 'speaking' || state.step === 'slots'}
+                onChange={e => {
+                  if (e.target.value && state.selectedDoctor) {
+                    handleDateSelected(state.selectedDoctor, e.target.value);
+                  }
+                }}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-2xl text-sm font-semibold text-gray-700 focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              />
+
+              {/* Quick-pick buttons */}
+              <div className="flex gap-2">
+                {['Today', 'Tomorrow', 'Day after'].map((label, i) => {
+                  const d = new Date();
+                  d.setDate(d.getDate() + i);
+                  const offset = d.getTimezoneOffset() * 60000;
+                  const dateStr = new Date(d.getTime() - offset).toISOString().split('T')[0];
+                  const isSelected = state.slotDate === dateStr;
+                  const isDisabled = state.voiceState === 'thinking' || state.voiceState === 'speaking' || state.step === 'slots';
+                  return (
+                    <button
+                      key={label}
+                      type="button"
+                      disabled={isDisabled}
+                      onClick={() => { if (!isDisabled && state.selectedDoctor) handleDateSelected(state.selectedDoctor, dateStr); }}
+                      className={`flex-1 py-2 rounded-xl border-2 text-xs font-bold transition-all ${
+                        isSelected
+                          ? 'border-blue-600 bg-blue-50 text-blue-700'
+                          : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'
+                      } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </section>
         )}

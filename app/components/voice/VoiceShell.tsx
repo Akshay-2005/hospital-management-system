@@ -3,7 +3,7 @@
 
 import React from 'react';
 import type { FSMState } from '@/lib/registration/field-fsm';
-import { FIELD_ORDER } from '@/lib/registration/field-specs';
+import { VOICE_FIELD_ORDER } from '@/lib/registration/field-specs';
 
 interface VoiceShellProps {
   state: FSMState;
@@ -25,7 +25,7 @@ const STATE_LABELS: Record<FSMState, string> = {
 };
 
 export function VoiceShell({ state, currentFieldIndex, children }: VoiceShellProps) {
-  const totalFields = FIELD_ORDER.length;
+  const totalFields = VOICE_FIELD_ORDER.length;
   const progress = Math.min((currentFieldIndex / totalFields) * 100, 100);
 
   const getStatusColor = () => {
@@ -60,8 +60,8 @@ export function VoiceShell({ state, currentFieldIndex, children }: VoiceShellPro
 
       {/* Field steps indicator */}
       <div className="flex gap-1">
-        {FIELD_ORDER.map((field, i) => {
-          if (field.name === 'age') return null; // Age is derived, not a visible step
+        {VOICE_FIELD_ORDER.map((field: { name: string }, i: number) => {
+          if (field.name === 'age') return null;
           return (
             <div
               key={field.name}
