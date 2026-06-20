@@ -304,10 +304,11 @@ function getTomorrowDateStr(): string {
 const STEP_MAP: Record<BookingStep, number> = {
   welcome: 1,
   symptoms: 2,
-  low_confidence: 2, // Still step 3 — clarification sub-step
+  low_confidence: 2, // Still step 3 - clarification sub-step
   doctors: 3,
-  slots: 4,
-  confirming: 5,
+  date: 4,           // <-- ADD THIS LINE
+  slots: 5,          // (You can bump these numbers down)
+  confirming: 6,
   confirmed: 6,
   emergency: 2,
   error: 2,
@@ -408,10 +409,10 @@ function VoiceBookingPageInner({
 
   const listen = useCallback(async (): Promise<{ text: string; confidence: number }> => {
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'listening', transcript: '' });
-    
+
     // Call the real Sarvam API engine
     const result = await voiceSessionRef.current?.listen() ?? { text: '', confidence: 0 };
-    
+
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'thinking', transcript: result.text });
     return result;
   }, []);
@@ -1136,16 +1137,15 @@ function VoiceBookingPageInner({
                     key={dateStr}
                     type="button"
                     onClick={() => {
-                        if (!isDisabled && state.selectedDoctor) {
-                            handleDateSelected(state.selectedDoctor, dateStr);
-                        }
+                      if (!isDisabled && state.selectedDoctor) {
+                        handleDateSelected(state.selectedDoctor, dateStr);
+                      }
                     }}
                     disabled={isDisabled}
-                    className={`flex-shrink-0 flex flex-col items-center justify-center w-20 h-20 rounded-2xl border-2 transition-all ${
-                        isSelected 
-                            ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-md' 
-                            : 'border-gray-200 bg-white hover:border-blue-300 text-gray-600'
-                    } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    className={`flex-shrink-0 flex flex-col items-center justify-center w-20 h-20 rounded-2xl border-2 transition-all ${isSelected
+                        ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-md'
+                        : 'border-gray-200 bg-white hover:border-blue-300 text-gray-600'
+                      } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                   >
                     <span className="text-xs font-bold uppercase">{d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
                     <span className="text-xl font-black mt-0.5">{d.getDate()}</span>
@@ -1305,8 +1305,8 @@ export default function VoiceBookingClient({
         </div>
       }
     >
-      <VoiceBookingPageInner 
-        initialOrgId={initialOrgId} 
+      <VoiceBookingPageInner
+        initialOrgId={initialOrgId}
         sessionPatientId={sessionPatientId}
         sessionPatientName={sessionPatientName}
       />
