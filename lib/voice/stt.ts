@@ -185,7 +185,10 @@ export async function listenOnce(
         }
         
         const data = await res.json();
-        console.log('[STT] Sarvam response:', data);
+        console.log('[STT] Response:', data);
+        if (data.provider && data.provider !== 'sarvam') {
+          console.log(`[STT] ⚠️ Using fallback provider: ${data.provider}`);
+        }
         
         let transcript = data.transcript || '';
         let translatedText = '';

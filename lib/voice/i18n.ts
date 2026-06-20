@@ -65,15 +65,15 @@ const EN: VoicePrompts = {
   greeting: 'Welcome! I will help you register as a patient. I will ask you a few questions one by one. You can correct any answer at any time. Let\'s begin.',
   
   field: {
-    hospital: 'Which hospital or clinic would you like to register at? Here are the options:',
+    hospital: 'Which hospital or clinic would you like to register at?',
     full_name: 'What is your full name?',
     phone: 'What is your 10-digit mobile phone number?',
     email: 'What is your email address? You can say "skip" if you don\'t want to provide one.',
     date_of_birth: 'What is your date of birth? Please say it as day, month, year. For example, 15 March 1990.',
     age: 'What is your age in years?',
-    gender: 'What is your gender? The options are: Male, Female, or Other.',
-    blood_group: 'What is your blood group? The options are: A positive, A negative, B positive, B negative, AB positive, AB negative, O positive, or O negative. You can say "skip" if you don\'t know.',
-    department: 'Which department would you like to visit? Here are the departments available at your hospital:',
+    gender: 'What is your gender?',
+    blood_group: 'What is your blood group? You can say "skip" if you don\'t know.',
+    department: 'Which department would you like to visit?',
     address: 'What is your address? You can say "skip" to add it later.',
     emergency_contact_name: 'What is the name of your emergency contact person? You can say "skip".',
     emergency_contact_phone: 'What is the phone number of your emergency contact? You can say "skip".',
@@ -92,12 +92,12 @@ const EN: VoicePrompts = {
   readBackDate: (date: string) => `The date I heard is: ${formatDateForSpeech(date, 'en')}. Is that correct?`,
   
   selectFromList: (options: string[]) => {
-    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join('. ');
-    return `Please choose one: ${numbered}. Say the name or the number.`;
+    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join(', ');
+    return `Below are the options — ${numbered}. Say the number or name.`;
   },
   noMatchRetry: (options: string[]) => {
-    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join('. ');
-    return `I didn't recognise that option. The available choices are: ${numbered}. Please say the name or number.`;
+    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join(', ');
+    return `I didn't recognise that. Below are the options — ${numbered}. Say the number or name.`;
   },
   
   allFieldsDone: 'All your details have been collected. Let me save your registration now.',
@@ -115,15 +115,15 @@ const HI: VoicePrompts = {
   greeting: 'नमस्ते! मैं आपको मरीज़ के रूप में पंजीकृत करने में मदद करूँगी। मैं आपसे एक-एक करके कुछ सवाल पूछूँगी। आप किसी भी जवाब को कभी भी सही कर सकते हैं। चलिए शुरू करते हैं।',
   
   field: {
-    hospital: 'आप किस अस्पताल या क्लिनिक में पंजीकरण करना चाहते हैं? यहाँ विकल्प हैं:',
+    hospital: 'आप किस अस्पताल या क्लिनिक में पंजीकरण करना चाहते हैं?',
     full_name: 'आपका पूरा नाम क्या है?',
     phone: 'आपका 10 अंकों का मोबाइल नंबर क्या है?',
     email: 'आपका ईमेल पता क्या है? अगर नहीं देना चाहते तो "छोड़ें" कहें।',
     date_of_birth: 'आपकी जन्म तिथि क्या है? कृपया तारीख, महीना, साल बताएं। जैसे 15 मार्च 1990।',
     age: 'आपकी उम्र क्या है? वर्षों में बताएं।',
-    gender: 'आपका लिंग क्या है? विकल्प हैं: पुरुष, महिला, या अन्य।',
-    blood_group: 'आपका रक्त समूह क्या है? विकल्प हैं: A पॉज़िटिव, A नेगेटिव, B पॉज़िटिव, B नेगेटिव, AB पॉज़िटिव, AB नेगेटिव, O पॉज़िटिव, या O नेगेटिव। अगर नहीं पता तो "छोड़ें" कहें।',
-    department: 'आप किस विभाग में जाना चाहते हैं? आपके अस्पताल में उपलब्ध विभाग हैं:',
+    gender: 'आपका लिंग क्या है?',
+    blood_group: 'आपका रक्त समूह क्या है? अगर नहीं पता तो "छोड़ें" कहें।',
+    department: 'आप किस विभाग में जाना चाहते हैं?',
     address: 'आपका पता क्या है? बाद में जोड़ने के लिए "छोड़ें" कहें।',
     emergency_contact_name: 'आपके आपातकालीन संपर्क व्यक्ति का नाम क्या है? "छोड़ें" कह सकते हैं।',
     emergency_contact_phone: 'आपके आपातकालीन संपर्क का फ़ोन नंबर क्या है? "छोड़ें" कह सकते हैं।',
@@ -142,12 +142,12 @@ const HI: VoicePrompts = {
   readBackDate: (date: string) => `मैंने जो तारीख सुनी वह है: ${formatDateForSpeech(date, 'hi')}। क्या यह सही है?`,
   
   selectFromList: (options: string[]) => {
-    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join('। ');
-    return `कृपया एक चुनें: ${numbered}। नाम या नंबर बोलें।`;
+    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join(', ');
+    return `नीचे विकल्प हैं — ${numbered}। नंबर या नाम बोलें।`;
   },
   noMatchRetry: (options: string[]) => {
-    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join('। ');
-    return `मैं वह विकल्प नहीं पहचान पाई। उपलब्ध विकल्प हैं: ${numbered}। कृपया नाम या नंबर बोलें।`;
+    const numbered = options.map((o, i) => `${i + 1}: ${o}`).join(', ');
+    return `मैं वह नहीं पहचान पाई। नीचे विकल्प हैं — ${numbered}। नंबर या नाम बोलें।`;
   },
   
   allFieldsDone: 'आपकी सभी जानकारी एकत्र हो गई है। अब मैं आपका पंजीकरण सहेज रही हूँ।',

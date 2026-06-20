@@ -130,6 +130,11 @@ export const FIELD_ORDER: FieldSpec[] = [
   },
 ];
 
+// Fields collected by voice — excludes address and emergency contacts (can be added later via profile)
+export const VOICE_FIELD_ORDER: FieldSpec[] = FIELD_ORDER.filter(
+  f => !['address', 'emergency_contact_name', 'emergency_contact_phone'].includes(f.name),
+);
+
 // ─── Validators ────────────────────────────────────────────────────────────────
 
 export interface ValidationResult {
@@ -436,10 +441,13 @@ function matchEnum(input: string, values: string[]): string | null {
     return values[num - 1];
   }
 
-  // Hindi gender mappings
+  // Hindi gender mappings + STT phonetic variants.
+  // en-IN STT commonly transcribes spoken "male" as "mail" (homophones in Indian English).
   const hindiMap: Record<string, string> = {
     'पुरुष': 'Male', 'पुरुस': 'Male', 'male': 'Male', 'man': 'Male',
+    'mail': 'Male', 'maile': 'Male', 'mayle': 'Male', 'mael': 'Male', 'mel': 'Male',
     'महिला': 'Female', 'female': 'Female', 'woman': 'Female', 'lady': 'Female',
+    'femail': 'Female', 'femaile': 'Female',
     'अन्य': 'Other', 'other': 'Other',
   };
   if (hindiMap[lower] && values.includes(hindiMap[lower])) return hindiMap[lower];

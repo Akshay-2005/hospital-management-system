@@ -4,7 +4,7 @@
 'use client';
 
 import React from 'react';
-import { User, Phone, Mail, Calendar, MapPin, Building2 } from 'lucide-react';
+import { User, Phone, Mail, Calendar, Building2 } from 'lucide-react';
 import type { FormData, OrgOption } from '@/lib/registration/field-fsm';
 import type { FieldName } from '@/lib/registration/field-specs';
 
@@ -38,8 +38,7 @@ export function VoiceFormMirror({
   // Map field index to field name for highlighting
   const fieldNames: FieldName[] = [
     'hospital', 'full_name', 'phone', 'email', 'date_of_birth', 'age',
-    'gender', 'blood_group', 'department', 'address',
-    'emergency_contact_name', 'emergency_contact_phone',
+    'gender', 'blood_group', 'department',
   ];
   const activeField = fieldNames[currentFieldIndex];
 
@@ -200,42 +199,6 @@ export function VoiceFormMirror({
           </select>
         </div>
 
-        {/* Address */}
-        <div className="sm:col-span-2">
-          <label className={labelCls}>Address</label>
-          <div className="relative">
-            <MapPin className="absolute left-3 top-3.5 w-4 h-4 text-gray-400" />
-            <input
-              value={formData.address}
-              onChange={e => onManualChange('address', e.target.value)}
-              placeholder="Your address"
-              className={getFieldClass('address', 'pl-10')}
-              disabled={disabled}
-            />
-          </div>
-        </div>
-
-        {/* Emergency Contact */}
-        <div>
-          <label className={labelCls}>Emergency Contact Name</label>
-          <input
-            value={formData.emergency_contact_name}
-            onChange={e => onManualChange('emergency_contact_name', e.target.value)}
-            placeholder="Contact person name"
-            className={getFieldClass('emergency_contact_name')}
-            disabled={disabled}
-          />
-        </div>
-        <div>
-          <label className={labelCls}>Emergency Contact Phone</label>
-          <input
-            value={formData.emergency_contact_phone}
-            onChange={e => onManualChange('emergency_contact_phone', e.target.value)}
-            placeholder="Emergency phone"
-            className={getFieldClass('emergency_contact_phone')}
-            disabled={disabled}
-          />
-        </div>
       </div>
     </div>
   );

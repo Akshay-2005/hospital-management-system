@@ -297,16 +297,25 @@ export default function VoiceRegistrationPage() {
               Save this ID — you will need it to log in
             </p>
           </div>
-          
-          {registrationResult?.setupLink && (
-            <a
-              href={`${registrationResult.setupLink}&redirectTo=/patient/appointments/choose-method`}
-              className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm"
-            >
-              Set Your Password →
-            </a>
-          )}
-          
+
+          {registrationResult?.setupLink && (() => {
+            // Rebuild as a relative path to prevent Vercel redirect bugs
+            let token = '';
+            try { token = new URL(registrationResult.setupLink).searchParams.get('token') ?? ''; } catch { }
+
+            // Combine Shlok's localPath fix with your redirectTo routing!
+            const localPath = `/patient/setup-password?token=${token}&redirectTo=/patient/appointments/choose-method`;
+
+            return (
+              <Link
+                href={localPath}
+                className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm text-center"
+              >
+                Set Your Password →
+              </Link>
+            );
+          })()}
+
           <Link
             href="/patient/login"
             className="block text-sm text-emerald-600 hover:underline font-medium"
