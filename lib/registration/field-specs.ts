@@ -183,6 +183,9 @@ export function validateField(
       // Strip all remaining whitespace
       cleanedEmail = cleanedEmail.replace(/\s+/g, '');
 
+      // Strip trailing STT punctuation (e.g. periods)
+      cleanedEmail = cleanedEmail.replace(/[.,;!?।॥]+$/, '');
+
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(cleanedEmail)) return { valid: false, cleaned: cleanedEmail, error: 'Invalid email format' };
       return { valid: true, cleaned: cleanedEmail };
