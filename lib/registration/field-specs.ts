@@ -10,7 +10,6 @@ export type FieldName =
   | 'age'
   | 'gender'
   | 'blood_group'
-  | 'department'
   | 'address'
   | 'emergency_contact_name'
   | 'emergency_contact_phone';
@@ -94,15 +93,6 @@ export const FIELD_ORDER: FieldSpec[] = [
     voiceHostile: false,
     skippable: true,
     maxRetries: 2,
-  },
-  {
-    name: 'department',
-    required: false,
-    type: 'list',
-    liveList: true,
-    voiceHostile: false,
-    skippable: false,
-    maxRetries: 3,
   },
   {
     name: 'address',
@@ -309,8 +299,7 @@ export function validateField(
       return { valid: true, cleaned: matched };
     }
 
-    case 'hospital':
-    case 'department': {
+    case 'hospital': {
       if (!trimmed) return { valid: false, cleaned: '', error: 'Selection required' };
       const options = context?.listOptions || [];
       if (options.length > 0) {

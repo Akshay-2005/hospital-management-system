@@ -41,7 +41,6 @@ export interface FormData {
   age: string;
   gender: string;
   blood_group: string;
-  department: string;
   address: string;
   emergency_contact_name: string;
   emergency_contact_phone: string;
@@ -61,7 +60,6 @@ export interface FSMContext {
   retries: number;
   pendingValue: string;
   organisations: OrgOption[];
-  departments: string[];
   error: string;
   transcriptLog: Array<{ role: 'assistant' | 'user'; text: string }>;
   isListening: boolean;
@@ -94,7 +92,6 @@ export function createInitialContext(): FSMContext {
       age: '',
       gender: 'Male',
       blood_group: '',
-      department: 'General',
       address: '',
       emergency_contact_name: '',
       emergency_contact_phone: '',
@@ -102,7 +99,6 @@ export function createInitialContext(): FSMContext {
     retries: 0,
     pendingValue: '',
     organisations: [],
-    departments: [],
     error: '',
     transcriptLog: [],
     isListening: false,
@@ -121,21 +117,20 @@ export class RegistrationFSM {
   private ctx: FSMContext;
   private session: VoiceSession;
   private onUpdate: (ctx: FSMContext) => void;
+  private onComplete: (data: any, patientId: string, password?: string, setupLink?: string) => void;
   private aborted: boolean = false;
 
   constructor(
     session: VoiceSession,
     organisations: OrgOption[],
     onUpdate: (ctx: FSMContext) => void,
-    onComplete: (data: any, patientId: string, setupLink?: string) => void,
-    fetchDepartments: (orgId: string) => Promise<string[]>,
+    onComplete: (data: any, patientId: string, password?: string, setupLink?: string) => void,
   ) {
     this.ctx = createInitialContext();
     this.ctx.organisations = organisations;
     this.session = session;
     this.onUpdate = onUpdate;
     this.onComplete = onComplete;
-    this.fetchDepartments = fetchDepartments;
   }
 
   abort() {
@@ -182,26 +177,35 @@ export class RegistrationFSM {
     this.update({ state: 'CONSENT' });
     await this.speak(prompts.consent);
     
+    const declineMsg = this.session.language === 'hi'
+      ? 'कोई बात नहीं। आप स्क्रीन पर फॉर्म भर सकते हैं।'
+      : 'No problem. You can fill the form on screen instead.';
+
     let consentRetries = 0;
-    while (consentRetries <= 2 && !this.aborted) {
+    const MAX_CONSENT_RETRIES = 2;
+    while (!this.aborted) {
       const consentResult = await this.listen('boolean');
       if (this.aborted) return;
 
       if (isYes(consentResult.text)) {
         break; // user consented
-      } else if (!consentResult.text) {
-        consentRetries++;
-        if (consentRetries <= 2) {
-          await this.speak(prompts.reask);
-          continue;
-        }
       }
 
-      // If it's a hard "no" or we ran out of retries, abort to manual
-      await this.speak(this.session.language === 'hi' 
-        ? 'कोई बात नहीं। आप स्क्रीन पर फॉर्म भर सकते हैं।'
-        : 'No problem. You can fill the form on screen instead.');
-      return;
+      if (isNo(consentResult.text)) {
+        // Explicit decline — fall back to manual entry immediately.
+        await this.speak(declineMsg);
+        return;
+      }
+
+      // Empty or unrecognised input: don't abort — re-prompt up to MAX times.
+      consentRetries++;
+      if (consentRetries > MAX_CONSENT_RETRIES) {
+        await this.speak(declineMsg);
+        return;
+      }
+      await this.speak(this.session.language === 'hi'
+        ? 'मुझे समझ नहीं आया। कृपया "हाँ" या "नहीं" कहें।'
+        : 'I didn\'t catch that, please say yes or no.');
     }
 
     // Greeting
@@ -263,21 +267,6 @@ export class RegistrationFSM {
     if (field.type === 'list' && field.name === 'hospital') {
       const orgNames = this.ctx.organisations.map(o => o.name);
       promptText += ' ' + prompts.selectFromList(orgNames);
-    } else if (field.type === 'list' && field.name === 'department') {
-      // Fetch departments for the selected org
-      if (this.ctx.formData.org_id) {
-        this.update({ isProcessing: true });
-        const deps = await this.fetchDepartments(this.ctx.formData.org_id);
-        this.update({ isProcessing: false, departments: deps });
-        if (deps.length > 0) {
-          promptText += ' ' + prompts.selectFromList(deps);
-        } else {
-          // Fallback to the manual form's hardcoded departments
-          const fallbackDeps = ['General', 'Cardiology', 'Orthopedics', 'Neurology', 'Pediatrics', 'Gynecology', 'Dermatology', 'ENT', 'Ophthalmology', 'Psychiatry', 'Oncology', 'Urology'];
-          this.update({ departments: fallbackDeps });
-          promptText += ' ' + prompts.selectFromList(fallbackDeps);
-        }
-      }
     } else if (field.type === 'enum' && field.enumValues) {
       promptText += ' ' + prompts.selectFromList(field.enumValues);
     }
@@ -309,9 +298,7 @@ export class RegistrationFSM {
       // Validate the input
       const listOptions = field.name === 'hospital'
         ? this.ctx.organisations.map(o => o.name)
-        : field.name === 'department'
-          ? this.ctx.departments
-          : undefined;
+        : undefined;
 
       const validation = validateField(field.name, result.text, {
         enumValues: field.enumValues,
@@ -414,7 +401,6 @@ export class RegistrationFSM {
         date_of_birth: this.ctx.formData.date_of_birth || '',
         address: this.ctx.formData.address || '',
         blood_group: this.ctx.formData.blood_group || '',
-        department: this.ctx.formData.department || 'General',
         emergency_contact_name: this.ctx.formData.emergency_contact_name || '',
         emergency_contact_phone: this.ctx.formData.emergency_contact_phone || '',
       };
@@ -430,7 +416,7 @@ export class RegistrationFSM {
       if (data.success) {
         this.update({ state: 'DONE', isProcessing: false });
         await this.speak(prompts.saveSuccess(data.patient_id));
-        this.onComplete(this.ctx.formData, data.patient_id, data.setup_link);
+        this.onComplete(this.ctx.formData, data.patient_id, data.password, data.setup_link);
       } else {
         this.update({ state: 'SAVE_ERROR', error: data.error || 'Save failed', isProcessing: false });
         await this.speak(prompts.saveError);
@@ -457,9 +443,7 @@ export class RegistrationFSM {
       enumValues: FIELD_ORDER.find(f => f.name === field)?.enumValues,
       listOptions: field === 'hospital'
         ? this.ctx.organisations.map(o => o.name)
-        : field === 'department'
-          ? this.ctx.departments
-          : undefined,
+        : undefined,
     });
 
     if (validation.valid) {
@@ -490,9 +474,7 @@ export class RegistrationFSM {
       enumValues: fieldSpec.enumValues,
       listOptions: fieldSpec.name === 'hospital'
         ? this.ctx.organisations.map(o => o.name)
-        : fieldSpec.name === 'department'
-          ? this.ctx.departments
-          : undefined,
+        : undefined,
     });
 
     if (!validation.valid) {

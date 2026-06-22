@@ -11,22 +11,14 @@ import type { FieldName } from '@/lib/registration/field-specs';
 interface VoiceFormMirrorProps {
   formData: FormData;
   organisations: OrgOption[];
-  departments: string[];
   currentFieldIndex: number;
   onManualChange: (field: FieldName, value: string) => void;
   disabled?: boolean;
 }
 
-const FALLBACK_DEPARTMENTS = [
-  'General', 'Cardiology', 'Orthopedics', 'Neurology', 'Pediatrics',
-  'Gynecology', 'Dermatology', 'ENT', 'Ophthalmology', 'Psychiatry',
-  'Oncology', 'Urology',
-];
-
 export function VoiceFormMirror({
   formData,
   organisations,
-  departments,
   currentFieldIndex,
   onManualChange,
   disabled,
@@ -38,7 +30,7 @@ export function VoiceFormMirror({
   // Map field index to field name for highlighting
   const fieldNames: FieldName[] = [
     'hospital', 'full_name', 'phone', 'email', 'date_of_birth', 'age',
-    'gender', 'blood_group', 'department',
+    'gender', 'blood_group',
   ];
   const activeField = fieldNames[currentFieldIndex];
 
@@ -47,8 +39,6 @@ export function VoiceFormMirror({
     const hasValue = !!(formData as any)[field === 'hospital' ? 'hospital_name' : field];
     return `${inputCls} ${extraCls || ''} ${isActive ? activeCls : ''} ${hasValue ? 'text-gray-900' : 'text-gray-400'} ${disabled ? 'opacity-75' : ''}`;
   };
-
-  const deptOptions = departments.length > 0 ? departments : FALLBACK_DEPARTMENTS;
 
   return (
     <div className="space-y-4">
@@ -180,21 +170,6 @@ export function VoiceFormMirror({
             <option value="">Select</option>
             {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(bg => (
               <option key={bg}>{bg}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Department */}
-        <div>
-          <label className={labelCls}>Department</label>
-          <select
-            value={formData.department}
-            onChange={e => onManualChange('department', e.target.value)}
-            className={getFieldClass('department')}
-            disabled={disabled}
-          >
-            {deptOptions.map(d => (
-              <option key={d}>{d}</option>
             ))}
           </select>
         </div>
