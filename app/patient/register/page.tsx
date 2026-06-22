@@ -4,7 +4,8 @@ import React, { useState, useEffect, Suspense } from 'react';
 import { DateField } from '@/app/components/ui/DateField';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { User, Phone, Mail, Calendar, MapPin, Loader2, CheckCircle, ArrowLeft, Building2, Mic } from 'lucide-react';
+import { User, Phone, Mail, Calendar, MapPin, Loader2, ArrowLeft, Building2, Mic } from 'lucide-react';
+import { RegistrationSuccess } from '@/app/components/registration/RegistrationSuccess';
 
 type Org = { id: string; name: string; slug: string; address: string | null };
 
@@ -17,13 +18,13 @@ function RegisterForm() {
     const [selectedOrg, setSelectedOrg] = useState(orgSlug);
     const [loading, setLoading] = useState(false);
     const [orgsLoading, setOrgsLoading] = useState(true);
-    const [success, setSuccess] = useState<{ patient_id: string; setup_link: string | null } | null>(null);
+    const [success, setSuccess] = useState<{ patient_id: string; password?: string; setup_link: string | null } | null>(null);
     const [error, setError] = useState('');
     const [showManualForm, setShowManualForm] = useState(false);
 
     const [form, setForm] = useState({
         full_name: '', phone: '', email: '', age: '', gender: 'Male',
-        date_of_birth: '', address: '', blood_group: '', department: 'General',
+        date_of_birth: '', address: '', blood_group: '',
         emergency_contact_name: '', emergency_contact_phone: '',
     });
 
@@ -56,7 +57,7 @@ function RegisterForm() {
             });
             const data = await res.json();
             if (data.success) {
-                setSuccess({ patient_id: data.patient_id, setup_link: data.setup_link });
+                setSuccess({ patient_id: data.patient_id, password: data.password, setup_link: data.setup_link });
             } else {
                 setError(data.error || 'Registration failed. Please try again.');
             }
@@ -68,29 +69,12 @@ function RegisterForm() {
 
     if (success) {
         return (
-            <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-50 flex items-center justify-center p-4">
-                <div className="bg-white rounded-3xl shadow-xl p-10 max-w-md w-full text-center space-y-5">
-                    <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
-                        <CheckCircle className="w-10 h-10 text-emerald-600" />
-                    </div>
-                    <h2 className="text-2xl font-black text-gray-900">Registration Successful!</h2>
-                    <p className="text-gray-500 text-sm">Your patient account has been created.</p>
-                    <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
-                        <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">Your Patient ID</p>
-                        <p className="text-3xl font-black text-emerald-700 font-mono">{success.patient_id}</p>
-                        <p className="text-xs text-gray-500 mt-2">Save this ID — you will need it to log in</p>
-                    </div>
-                    {success.setup_link && (
-                        <a href={success.setup_link}
-                            className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm">
-                            Set Your Password →
-                        </a>
-                    )}
-                    <Link href="/patient/login" className="block text-sm text-emerald-600 hover:underline font-medium">
-                        Go to Login
-                    </Link>
-                </div>
-            </div>
+            <RegistrationSuccess
+                patientId={success.patient_id}
+                password={success.password}
+                redirectTo="/patient/appointments/choose-method"
+                ctaLabel="Continue"
+            />
         );
     }
 
@@ -267,14 +251,6 @@ function RegisterForm() {
                                 <select value={form.blood_group} onChange={e => setForm(f => ({ ...f, blood_group: e.target.value }))} className={inputCls}>
                                     <option value="">Select</option>
                                     {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(bg => <option key={bg}>{bg}</option>)}
-                                </select>
-                            </div>
-
-                            {/* Department */}
-                            <div>
-                                <label className={labelCls}>Department</label>
-                                <select value={form.department} onChange={e => setForm(f => ({ ...f, department: e.target.value }))} className={inputCls}>
-                                    {['General', 'Cardiology', 'Orthopedics', 'Neurology', 'Pediatrics', 'Gynecology', 'Dermatology', 'ENT', 'Ophthalmology', 'Psychiatry', 'Oncology', 'Urology'].map(d => <option key={d}>{d}</option>)}
                                 </select>
                             </div>
 

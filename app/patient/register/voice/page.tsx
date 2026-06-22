@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, CheckCircle, Mic, MicOff, Volume2 } from 'lucide-react';
+import { ArrowLeft, Loader2, Mic, MicOff, Volume2 } from 'lucide-react';
 import type { LanguageCode, RegistrationResult } from '@/lib/contracts/voice';
 import { createVoiceSession, isSTTSupported, preloadVoices } from '@/lib/voice/session';
 import { requestMicPermission } from '@/lib/voice/stt';
@@ -18,6 +18,7 @@ import { VoiceMicButton } from '@/app/components/voice/VoiceMicButton';
 import { VoiceTranscript } from '@/app/components/voice/VoiceTranscript';
 import { VoiceShell } from '@/app/components/voice/VoiceShell';
 import { VoiceFormMirror } from '@/app/components/registration/VoiceFormMirror';
+import { RegistrationSuccess } from '@/app/components/registration/RegistrationSuccess';
 
 // ─── Mock booking handler (Track B placeholder) ────────────────────────────────
 function mockBookingHandler(result: RegistrationResult): void {
@@ -41,6 +42,7 @@ export default function VoiceRegistrationPage() {
   const [fsmCtx, setFsmCtx] = useState<FSMContext | null>(null);
   const [registrationResult, setRegistrationResult] = useState<RegistrationResult | null>(null);
   const [successPatientId, setSuccessPatientId] = useState<string>('');
+  const [successPassword, setSuccessPassword] = useState<string>('');
 
   const fsmRef = useRef<RegistrationFSM | null>(null);
 
@@ -66,17 +68,6 @@ export default function VoiceRegistrationPage() {
       .catch(() => setOrgsLoading(false));
   }, []);
 
-  // ─── Fetch departments for a given org ─────────────────────────────────────
-  const fetchDepartments = useCallback(async (orgId: string): Promise<string[]> => {
-    try {
-      const res = await fetch(`/api/organisations/${orgId}/departments`);
-      const data = await res.json();
-      return (data.departments || []).map((d: any) => d.name);
-    } catch {
-      return [];
-    }
-  }, []);
-
   // ─── Consent + mic permission ──────────────────────────────────────────────
   const handleConsentAndMic = async () => {
     const granted = await requestMicPermission();
@@ -99,8 +90,9 @@ export default function VoiceRegistrationPage() {
       session,
       orgs,
       (ctx) => setFsmCtx({ ...ctx }),
-      (formData, patientId, setupLink) => {
+      (formData, patientId, password, setupLink) => {
         setSuccessPatientId(patientId);
+        setSuccessPassword(password ?? '');
 
         const result: RegistrationResult = {
           patientId,
@@ -114,7 +106,6 @@ export default function VoiceRegistrationPage() {
         mockBookingHandler(result);
         setStep('success');
       },
-      fetchDepartments,
     );
 
     fsmRef.current = fsm;
@@ -276,54 +267,15 @@ export default function VoiceRegistrationPage() {
 
   // ─── Render: Success ───────────────────────────────────────────────────────
   if (step === 'success' && registrationResult) {
+    // Route to the "Choose Next Step" interstitial. The patient is auto-logged-in,
+    // so the booking pages resolve their identity from the session.
     return (
-      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-3xl shadow-xl p-10 max-w-md w-full text-center space-y-5">
-          <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
-            <CheckCircle className="w-10 h-10 text-emerald-600" />
-          </div>
-          <h2 className="text-2xl font-black text-gray-900">Registration Successful!</h2>
-          <p className="text-gray-500 text-sm">
-            Your patient account has been created.
-          </p>
-          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
-            <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">
-              Your Patient ID
-            </p>
-            <p className="text-3xl font-black text-emerald-700 font-mono">
-              {successPatientId}
-            </p>
-            <p className="text-xs text-gray-500 mt-2">
-              Save this ID — you will need it to log in
-            </p>
-          </div>
-
-          {registrationResult?.setupLink && (() => {
-            // Rebuild as a relative path to prevent Vercel redirect bugs
-            let token = '';
-            try { token = new URL(registrationResult.setupLink).searchParams.get('token') ?? ''; } catch { }
-
-            // Combine Shlok's localPath fix with your redirectTo routing!
-            const localPath = `/patient/setup-password?token=${token}&redirectTo=/patient/appointments/choose-method`;
-
-            return (
-              <Link
-                href={localPath}
-                className="block w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition text-sm text-center"
-              >
-                Set Your Password →
-              </Link>
-            );
-          })()}
-
-          <Link
-            href="/patient/login"
-            className="block text-sm text-emerald-600 hover:underline font-medium"
-          >
-            Go to Login
-          </Link>
-        </div>
-      </div>
+      <RegistrationSuccess
+        patientId={successPatientId}
+        password={successPassword}
+        redirectTo="/patient/appointments/choose-method"
+        ctaLabel="Continue"
+      />
     );
   }
 
@@ -433,7 +385,6 @@ export default function VoiceRegistrationPage() {
                   <VoiceFormMirror
                     formData={fsmCtx.formData}
                     organisations={orgs}
-                    departments={fsmCtx.departments}
                     currentFieldIndex={fsmCtx.currentFieldIndex}
                     onManualChange={handleManualChange}
                   />

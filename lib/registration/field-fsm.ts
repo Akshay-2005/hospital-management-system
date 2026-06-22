@@ -24,6 +24,7 @@ export type FSMState =
   | 'GREETING'
   | 'COLLECT_FIELD'
   | 'CONFIRM_FIELD'
+  | 'REVIEW'
   | 'MANUAL_FALLBACK'
   | 'NEXT_OR_SAVE'
   | 'SAVE_PATIENT'
@@ -41,7 +42,6 @@ export interface FormData {
   age: string;
   gender: string;
   blood_group: string;
-  department: string;
   address: string;
   emergency_contact_name: string;
   emergency_contact_phone: string;
@@ -61,7 +61,6 @@ export interface FSMContext {
   retries: number;
   pendingValue: string;
   organisations: OrgOption[];
-  departments: string[];
   error: string;
   transcriptLog: Array<{ role: 'assistant' | 'user'; text: string }>;
   isListening: boolean;
@@ -94,7 +93,6 @@ export function createInitialContext(): FSMContext {
       age: '',
       gender: 'Male',
       blood_group: '',
-      department: 'General',
       address: '',
       emergency_contact_name: '',
       emergency_contact_phone: '',
@@ -102,7 +100,6 @@ export function createInitialContext(): FSMContext {
     retries: 0,
     pendingValue: '',
     organisations: [],
-    departments: [],
     error: '',
     transcriptLog: [],
     isListening: false,
@@ -121,21 +118,20 @@ export class RegistrationFSM {
   private ctx: FSMContext;
   private session: VoiceSession;
   private onUpdate: (ctx: FSMContext) => void;
+  private onComplete: (data: any, patientId: string, password?: string, setupLink?: string) => void;
   private aborted: boolean = false;
 
   constructor(
     session: VoiceSession,
     organisations: OrgOption[],
     onUpdate: (ctx: FSMContext) => void,
-    onComplete: (data: any, patientId: string, setupLink?: string) => void,
-    fetchDepartments: (orgId: string) => Promise<string[]>,
+    onComplete: (data: any, patientId: string, password?: string, setupLink?: string) => void,
   ) {
     this.ctx = createInitialContext();
     this.ctx.organisations = organisations;
     this.session = session;
     this.onUpdate = onUpdate;
     this.onComplete = onComplete;
-    this.fetchDepartments = fetchDepartments;
   }
 
   abort() {
@@ -182,26 +178,35 @@ export class RegistrationFSM {
     this.update({ state: 'CONSENT' });
     await this.speak(prompts.consent);
     
+    const declineMsg = this.session.language === 'hi'
+      ? 'कोई बात नहीं। आप स्क्रीन पर फॉर्म भर सकते हैं।'
+      : 'No problem. You can fill the form on screen instead.';
+
     let consentRetries = 0;
-    while (consentRetries <= 2 && !this.aborted) {
+    const MAX_CONSENT_RETRIES = 2;
+    while (!this.aborted) {
       const consentResult = await this.listen('boolean');
       if (this.aborted) return;
 
       if (isYes(consentResult.text)) {
         break; // user consented
-      } else if (!consentResult.text) {
-        consentRetries++;
-        if (consentRetries <= 2) {
-          await this.speak(prompts.reask);
-          continue;
-        }
       }
 
-      // If it's a hard "no" or we ran out of retries, abort to manual
-      await this.speak(this.session.language === 'hi' 
-        ? 'कोई बात नहीं। आप स्क्रीन पर फॉर्म भर सकते हैं।'
-        : 'No problem. You can fill the form on screen instead.');
-      return;
+      if (isNo(consentResult.text)) {
+        // Explicit decline — fall back to manual entry immediately.
+        await this.speak(declineMsg);
+        return;
+      }
+
+      // Empty or unrecognised input: don't abort — re-prompt up to MAX times.
+      consentRetries++;
+      if (consentRetries > MAX_CONSENT_RETRIES) {
+        await this.speak(declineMsg);
+        return;
+      }
+      await this.speak(this.session.language === 'hi'
+        ? 'मुझे समझ नहीं आया। कृपया "हाँ" या "नहीं" कहें।'
+        : 'I didn\'t catch that, please say yes or no.');
     }
 
     // Greeting
@@ -247,8 +252,116 @@ export class RegistrationFSM {
 
     if (!this.aborted) {
       this.update({ state: 'NEXT_OR_SAVE' });
-      await this.savePatient();
+      await this.reviewAndSave();
     }
+  }
+
+  // ─── Review & edit (final confirmation before save) ──────────────────────────
+
+  /**
+   * Read the collected details back to the patient and let them either confirm
+   * (save) or name a field to correct. Targeted edits re-run collectSingleField
+   * for just that field, then loop back to the review summary.
+   */
+  private async reviewAndSave() {
+    const prompts = getPrompts(this.session.language);
+    this.update({ state: 'REVIEW' });
+
+    let speakSummary = true;
+    let misses = 0;
+    const MAX_MISSES = 3; // safety valve — never trap the user in the review loop
+
+    while (!this.aborted) {
+      if (speakSummary) {
+        await this.speak(this.buildReviewSummary());
+        await this.speak(prompts.reviewConfirm);
+        speakSummary = false;
+      }
+
+      const { text } = await this.listen();
+      if (this.aborted) return;
+
+      // Confirmed → save and finish.
+      if (isYes(text)) {
+        await this.savePatient();
+        return;
+      }
+
+      // Named a field → re-collect just that field, then re-review.
+      const target = this.detectEditField(text);
+      if (target) {
+        const voiceIdx = VOICE_FIELD_ORDER.findIndex(f => f.name === target.name);
+        if (voiceIdx >= 0) this.update({ currentFieldIndex: voiceIdx });
+
+        this.update({ state: 'COLLECT_FIELD' });
+        const ok = await this.collectSingleField(target);
+        if (this.aborted) return;
+        if (!ok) {
+          // Manual fallback was triggered during the edit — hand off to the UI.
+          this.update({ state: 'MANUAL_FALLBACK' });
+          return;
+        }
+
+        // Keep age in sync if the date of birth was edited.
+        if (target.name === 'date_of_birth' && this.ctx.formData.date_of_birth) {
+          const date = new Date(this.ctx.formData.date_of_birth);
+          if (!isNaN(date.getTime())) {
+            const ageYears = Math.floor((Date.now() - date.getTime()) / (365.25 * 24 * 3600 * 1000));
+            this.ctx.formData.age = ageYears.toString();
+          }
+        }
+
+        this.update({ state: 'REVIEW', currentFieldIndex: VOICE_FIELD_ORDER.length, formData: { ...this.ctx.formData } });
+        speakSummary = true; // re-read the updated summary
+        misses = 0;
+        continue;
+      }
+
+      // "No"/garbled without a named field → ask which field to edit.
+      misses++;
+      if (misses > MAX_MISSES) {
+        // Couldn't understand repeatedly — save rather than loop forever.
+        await this.savePatient();
+        return;
+      }
+      await this.speak(prompts.reviewWhichField);
+    }
+  }
+
+  /** Build the spoken read-back summary from every collected field that has a value. */
+  private buildReviewSummary(): string {
+    const lang = this.session.language;
+    const pairs: Array<{ label: string; value: string }> = [];
+    for (const field of FIELD_ORDER) {
+      const key = field.name === 'hospital' ? 'hospital_name' : field.name;
+      let value = String((this.ctx.formData as any)[key] ?? '').trim();
+      if (!value) continue;
+      // Read phone numbers digit-by-digit so TTS doesn't say them as one big number.
+      if (field.type === 'phone') value = value.split('').join(' ');
+      pairs.push({ label: getFieldLabel(lang, field.name), value });
+    }
+    return getPrompts(lang).reviewSummary(pairs);
+  }
+
+  /** Map a spoken response to the field the patient wants to edit (EN + HI keywords). */
+  private detectEditField(text: string): FieldSpec | undefined {
+    if (!text) return undefined;
+    const t = text.toLowerCase();
+    const KW: Partial<Record<FieldName, string[]>> = {
+      hospital: ['hospital', 'clinic', 'अस्पताल', 'क्लिनिक'],
+      full_name: ['name', 'नाम'],
+      phone: ['phone', 'mobile', 'number', 'फ़ोन', 'फोन', 'मोबाइल', 'नंबर'],
+      email: ['email', 'mail', 'ईमेल'],
+      date_of_birth: ['birth', 'dob', 'जन्म', 'जन्मतिथि'],
+      age: ['age', 'उम्र', 'आयु'],
+      gender: ['gender', 'sex', 'लिंग'],
+      blood_group: ['blood', 'रक्त', 'ब्लड'],
+      address: ['address', 'पता'],
+    };
+    for (const field of FIELD_ORDER) {
+      if ((KW[field.name] || []).some(kw => t.includes(kw))) return field;
+    }
+    return undefined;
   }
 
   private async collectSingleField(field: FieldSpec): Promise<boolean> {
@@ -263,21 +376,6 @@ export class RegistrationFSM {
     if (field.type === 'list' && field.name === 'hospital') {
       const orgNames = this.ctx.organisations.map(o => o.name);
       promptText += ' ' + prompts.selectFromList(orgNames);
-    } else if (field.type === 'list' && field.name === 'department') {
-      // Fetch departments for the selected org
-      if (this.ctx.formData.org_id) {
-        this.update({ isProcessing: true });
-        const deps = await this.fetchDepartments(this.ctx.formData.org_id);
-        this.update({ isProcessing: false, departments: deps });
-        if (deps.length > 0) {
-          promptText += ' ' + prompts.selectFromList(deps);
-        } else {
-          // Fallback to the manual form's hardcoded departments
-          const fallbackDeps = ['General', 'Cardiology', 'Orthopedics', 'Neurology', 'Pediatrics', 'Gynecology', 'Dermatology', 'ENT', 'Ophthalmology', 'Psychiatry', 'Oncology', 'Urology'];
-          this.update({ departments: fallbackDeps });
-          promptText += ' ' + prompts.selectFromList(fallbackDeps);
-        }
-      }
     } else if (field.type === 'enum' && field.enumValues) {
       promptText += ' ' + prompts.selectFromList(field.enumValues);
     }
@@ -309,9 +407,7 @@ export class RegistrationFSM {
       // Validate the input
       const listOptions = field.name === 'hospital'
         ? this.ctx.organisations.map(o => o.name)
-        : field.name === 'department'
-          ? this.ctx.departments
-          : undefined;
+        : undefined;
 
       const validation = validateField(field.name, result.text, {
         enumValues: field.enumValues,
@@ -414,7 +510,6 @@ export class RegistrationFSM {
         date_of_birth: this.ctx.formData.date_of_birth || '',
         address: this.ctx.formData.address || '',
         blood_group: this.ctx.formData.blood_group || '',
-        department: this.ctx.formData.department || 'General',
         emergency_contact_name: this.ctx.formData.emergency_contact_name || '',
         emergency_contact_phone: this.ctx.formData.emergency_contact_phone || '',
       };
@@ -430,7 +525,7 @@ export class RegistrationFSM {
       if (data.success) {
         this.update({ state: 'DONE', isProcessing: false });
         await this.speak(prompts.saveSuccess(data.patient_id));
-        this.onComplete(this.ctx.formData, data.patient_id, data.setup_link);
+        this.onComplete(this.ctx.formData, data.patient_id, data.password, data.setup_link);
       } else {
         this.update({ state: 'SAVE_ERROR', error: data.error || 'Save failed', isProcessing: false });
         await this.speak(prompts.saveError);
@@ -457,9 +552,7 @@ export class RegistrationFSM {
       enumValues: FIELD_ORDER.find(f => f.name === field)?.enumValues,
       listOptions: field === 'hospital'
         ? this.ctx.organisations.map(o => o.name)
-        : field === 'department'
-          ? this.ctx.departments
-          : undefined,
+        : undefined,
     });
 
     if (validation.valid) {
@@ -490,9 +583,7 @@ export class RegistrationFSM {
       enumValues: fieldSpec.enumValues,
       listOptions: fieldSpec.name === 'hospital'
         ? this.ctx.organisations.map(o => o.name)
-        : fieldSpec.name === 'department'
-          ? this.ctx.departments
-          : undefined,
+        : undefined,
     });
 
     if (!validation.valid) {

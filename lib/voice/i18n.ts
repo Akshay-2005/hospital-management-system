@@ -28,6 +28,11 @@ export interface VoicePrompts {
   selectFromList: (options: string[]) => string;
   noMatchRetry: (options: string[]) => string;
   
+  // Review & edit (final confirmation before save)
+  reviewSummary: (pairs: Array<{ label: string; value: string }>) => string;
+  reviewConfirm: string;
+  reviewWhichField: string;
+
   // Completion
   allFieldsDone: string;
   savingPatient: string;
@@ -73,7 +78,6 @@ const EN: VoicePrompts = {
     age: 'What is your age in years?',
     gender: 'What is your gender?',
     blood_group: 'What is your blood group? You can say "skip" if you don\'t know.',
-    department: 'Which department would you like to visit?',
     address: 'What is your address? You can say "skip" to add it later.',
     emergency_contact_name: 'What is the name of your emergency contact person? You can say "skip".',
     emergency_contact_phone: 'What is the phone number of your emergency contact? You can say "skip".',
@@ -100,13 +104,18 @@ const EN: VoicePrompts = {
     return `I didn't recognise that. Below are the options — ${numbered}. Say the number or name.`;
   },
   
+  reviewSummary: (pairs) =>
+    'Here is what I have. ' + pairs.map(p => `${p.label} is ${p.value}`).join('. ') + '.',
+  reviewConfirm: 'Shall I save this registration? Say "yes" to confirm, or tell me which field you would like to change.',
+  reviewWhichField: 'Which field would you like to edit? For example, say name, phone, age, or address.',
+
   allFieldsDone: 'All your details have been collected. Let me save your registration now.',
   savingPatient: 'Saving your registration, please wait...',
   saveSuccess: (patientId: string) => `Registration successful! Your patient ID is ${patientId}. Please save this ID.`,
   saveError: 'There was an error saving your registration. Please try again or use the form on screen to submit.',
-  
+
   derivedAge: (age: string, dob: string) => `Based on your date of birth ${formatDateForSpeech(dob, 'en')}, your age is ${age} years. Is that correct?`,
-  
+
   skipPrompt: 'Say "skip" to leave this field blank, or provide a value.',
 };
 
@@ -123,7 +132,6 @@ const HI: VoicePrompts = {
     age: 'आपकी उम्र क्या है? वर्षों में बताएं।',
     gender: 'आपका लिंग क्या है?',
     blood_group: 'आपका रक्त समूह क्या है? अगर नहीं पता तो "छोड़ें" कहें।',
-    department: 'आप किस विभाग में जाना चाहते हैं?',
     address: 'आपका पता क्या है? बाद में जोड़ने के लिए "छोड़ें" कहें।',
     emergency_contact_name: 'आपके आपातकालीन संपर्क व्यक्ति का नाम क्या है? "छोड़ें" कह सकते हैं।',
     emergency_contact_phone: 'आपके आपातकालीन संपर्क का फ़ोन नंबर क्या है? "छोड़ें" कह सकते हैं।',
@@ -150,6 +158,11 @@ const HI: VoicePrompts = {
     return `मैं वह नहीं पहचान पाई। नीचे विकल्प हैं — ${numbered}। नंबर या नाम बोलें।`;
   },
   
+  reviewSummary: (pairs) =>
+    'मैंने यह जानकारी दर्ज की है। ' + pairs.map(p => `${p.label} ${p.value} है`).join('। ') + '।',
+  reviewConfirm: 'क्या मैं यह पंजीकरण सहेज दूँ? पुष्टि के लिए "हाँ" कहें, या बताएं कि आप कौन सा विवरण बदलना चाहते हैं।',
+  reviewWhichField: 'आप कौन सा विवरण बदलना चाहते हैं? जैसे नाम, फ़ोन, उम्र, या पता बोलें।',
+
   allFieldsDone: 'आपकी सभी जानकारी एकत्र हो गई है। अब मैं आपका पंजीकरण सहेज रही हूँ।',
   savingPatient: 'पंजीकरण सहेजा जा रहा है, कृपया प्रतीक्षा करें...',
   saveSuccess: (patientId: string) => `पंजीकरण सफल! आपकी मरीज़ आईडी ${patientId} है। कृपया इसे सहेजें।`,
@@ -177,7 +190,6 @@ const FIELD_LABELS: Record<LanguageCode, Record<string, string>> = {
     age: 'age',
     gender: 'gender',
     blood_group: 'blood group',
-    department: 'department',
     address: 'address',
     emergency_contact_name: 'emergency contact name',
     emergency_contact_phone: 'emergency contact phone',
@@ -191,7 +203,6 @@ const FIELD_LABELS: Record<LanguageCode, Record<string, string>> = {
     age: 'उम्र',
     gender: 'लिंग',
     blood_group: 'रक्त समूह',
-    department: 'विभाग',
     address: 'पता',
     emergency_contact_name: 'आपातकालीन संपर्क नाम',
     emergency_contact_phone: 'आपातकालीन संपर्क फ़ोन',

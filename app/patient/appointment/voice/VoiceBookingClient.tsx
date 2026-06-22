@@ -41,6 +41,7 @@ import type {
 } from '@/lib/contracts/voice';
 
 import { createVoiceSession } from '@/lib/voice/session';
+import { isYes, isNo } from '@/lib/registration/field-specs';
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,12 +408,16 @@ function VoiceBookingPageInner({
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
   }, []);
 
-  const listen = useCallback(async (): Promise<{ text: string; confidence: number }> => {
+  const listen = useCallback(async (
+    expectedType: 'boolean' | 'text' = 'text',
+  ): Promise<{ text: string; confidence: number }> => {
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'listening', transcript: '' });
-    
-    // Call the real Sarvam API engine
-    const result = await voiceSessionRef.current?.listen() ?? { text: '', confidence: 0 };
-    
+
+    // Forward the hint to the voice kernel. For yes/no confirmations pass
+    // 'boolean' so STT uses the fast local Web Speech path instead of the
+    // slower Sarvam record-upload-transcribe round trip.
+    const result = await voiceSessionRef.current?.listen(expectedType) ?? { text: '', confidence: 0 };
+
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'thinking', transcript: result.text });
     return result;
   }, []);
@@ -845,10 +850,45 @@ function VoiceBookingPageInner({
 
   const handleSlotSelected = useCallback(async (slot: SlotCard, doctor: DoctorCard) => {
     dispatch({ type: 'SLOT_SELECTED', slot });
-    await speak(`You selected the ${formatTimeSpoken(slot.startTime)} slot. Let me confirm your booking now.`);
-    await runBookingStep(slot, doctor);
+
+    // ── Explicit final confirmation before creating the appointment ──────────
+    // Read back the chosen doctor + date/slot, then ask a yes/no question using
+    // the fast local boolean STT path (listen('boolean')).
+    const readBack =
+      `Just to confirm: an appointment with Dr. ${doctor.name}, ${doctor.specialty}, `
+      + `on ${formatDateSpoken(slot.date)} at ${formatTimeSpoken(slot.startTime)}. `
+      + `Shall I confirm this booking? Say yes or no.`;
+
+    // Allow a couple of re-asks if the answer is unclear.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await speak(
+        attempt === 0
+          ? readBack
+          : 'Sorry, I didn\'t catch that. Shall I confirm this booking? Please say yes or no.',
+      );
+
+      const { text } = await listen('boolean');
+
+      if (isYes(text)) {
+        await speak('Great, confirming your booking now.');
+        await runBookingStep(slot, doctor);
+        return;
+      }
+
+      if (isNo(text)) {
+        // Patient declined — return to slot selection so they can pick another time.
+        await speak('No problem. Please choose a different time slot.');
+        dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
+        return;
+      }
+      // Unrecognised answer — loop and re-ask.
+    }
+
+    // Exhausted retries — leave the selection on screen for manual confirmation.
+    dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
+    await speak('I\'ll leave your selection on screen. Tap a slot to continue.');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speak]);
+  }, [speak, listen]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Step 6: Create appointment
@@ -1255,11 +1295,10 @@ function VoiceBookingPageInner({
                       type="button"
                       disabled={isDisabled}
                       onClick={() => { if (!isDisabled && state.selectedDoctor) handleDateSelected(state.selectedDoctor, dateStr); }}
-                      className={`flex-1 py-2 rounded-xl border-2 text-xs font-bold transition-all ${
-                        isSelected
+                      className={`flex-1 py-2 rounded-xl border-2 text-xs font-bold transition-all ${isSelected
                           ? 'border-blue-600 bg-blue-50 text-blue-700'
                           : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'
-                      } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                        } ${isDisabled && !isSelected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                     >
                       {label}
                     </button>
@@ -1418,8 +1457,8 @@ export default function VoiceBookingClient({
         </div>
       }
     >
-      <VoiceBookingPageInner 
-        initialOrgId={initialOrgId} 
+      <VoiceBookingPageInner
+        initialOrgId={initialOrgId}
         sessionPatientId={sessionPatientId}
         sessionPatientName={sessionPatientName}
       />
