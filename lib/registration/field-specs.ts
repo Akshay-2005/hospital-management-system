@@ -542,39 +542,96 @@ function matchFromList(input: string, options: string[]): string | null {
   return null;
 }
 
-// ─── Skip detection ────────────────────────────────────────────────────────────
+// ─── Intent detection (skip / yes / no) ─────────────────────────────────────────
+//
+// The previous implementation split on whitespace and matched whole words against
+// a Set. That silently broke for multi-word confirmations ("sahi hai", "theek hai",
+// "बाद में") and for any punctuation the STT engine appended. This caused the
+// confirmation short-circuit to fail, sending the dialogue into long retry loops.
+//
+// The matcher below:
+//   1. force-lowercases the text,
+//   2. strips ALL punctuation (periods, commas, danda, etc.) while preserving
+//      Latin, digits and Devanagari letters,
+//   3. matches single-word tokens by exact word and multi-word tokens by phrase.
 
-const SKIP_WORDS = new Set([
-  'skip', 'छोड़ें', 'छोड़ो', 'छोड़', 'chhodo', 'nahi', 'no', 'none',
-  'not now', 'later', 'बाद में', 'नहीं', 'dismiss', 'leave', 'pass'
-]);
-
-function hasIntentWord(text: string, wordSet: Set<string>): boolean {
-  // Strip punctuation and split into words
-  const words = text.toLowerCase().replace(/[.,?!।]/g, '').split(/\s+/);
-  return words.some(w => wordSet.has(w));
+/**
+ * Normalise spoken text for intent matching: lowercase, strip punctuation
+ * (including the Hindi danda ।/॥), collapse whitespace.
+ */
+function normalizeIntentText(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[।॥]/g, ' ')         // Hindi danda / double danda
+    .replace(/[^\w\sऀ-ॿ]/g, ' ')   // strip punctuation, keep latin/digits/Devanagari
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
+/**
+ * Returns true if the (normalised) text contains any of the given intent tokens.
+ * Tokens containing a space are matched as phrases (substring of the normalised
+ * text); single-word tokens are matched as whole words to avoid false positives.
+ */
+function matchesIntent(text: string, tokens: string[]): boolean {
+  const norm = normalizeIntentText(text);
+  if (!norm) return false;
+  const wordSet = new Set(norm.split(' '));
+  for (const token of tokens) {
+    if (token.includes(' ')) {
+      if (norm.includes(token)) return true;
+    } else if (wordSet.has(token)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ─── Skip detection ────────────────────────────────────────────────────────────
+
+const SKIP_TOKENS = [
+  // English
+  'skip', 'none', 'dismiss', 'leave', 'pass', 'later', 'not now',
+  // Hindi (Devanagari)
+  'छोड़ें', 'छोड़ो', 'छोड़', 'बाद में', 'नहीं', 'ना',
+  // Hindi (romanised)
+  'chhodo', 'chhod', 'chhodna', 'nahi', 'nahin', 'baad mein',
+];
+
 export function isSkipIntent(text: string): boolean {
-  return hasIntentWord(text, SKIP_WORDS);
+  return matchesIntent(text, SKIP_TOKENS);
 }
 
 // ─── Confirmation detection ────────────────────────────────────────────────────
 
-const YES_WORDS = new Set([
-  'yes', 'yeah', 'yep', 'correct', 'right', 'confirm', 'ok', 'okay',
-  'हाँ', 'हां', 'सही', 'ठीक', 'जी', 'ha', 'haan', 'theek',
-]);
+const YES_TOKENS = [
+  // English
+  'yes', 'yeah', 'yep', 'yup', 'ya', 'yo', 'sure', 'correct', 'right',
+  'confirm', 'confirmed', 'ok', 'okay', 'okey', 'fine', 'good',
+  'absolutely', 'definitely', 'go ahead', 'of course',
+  'that is right', 'thats right', 'that is correct', 'thats correct',
+  // Hindi (Devanagari)
+  'हाँ', 'हां', 'जी', 'जी हाँ', 'जी हां', 'हाँजी', 'सही', 'सही है',
+  'ठीक', 'ठीक है', 'बिलकुल', 'सच',
+  // Hindi (romanised)
+  'haan', 'haa', 'ha', 'hanji', 'haan ji', 'ji', 'ji haan', 'ji haa',
+  'sahi', 'sahi hai', 'theek', 'theek hai', 'thik', 'thik hai', 'bilkul',
+];
 
-const NO_WORDS = new Set([
-  'no', 'nope', 'wrong', 'incorrect', 'change', 'retry', 'again',
-  'नहीं', 'गलत', 'बदलो', 'nahi', 'galat',
-]);
+const NO_TOKENS = [
+  // English
+  'no', 'nope', 'nah', 'naw', 'wrong', 'incorrect', 'not correct',
+  'not right', 'change', 'retry', 'again', 'try again',
+  // Hindi (Devanagari)
+  'नहीं', 'ना', 'गलत', 'गलत है', 'बदलो', 'बदलें', 'दुबारा',
+  // Hindi (romanised)
+  'nahi', 'nahin', 'na', 'galat', 'galat hai', 'badlo', 'dubara',
+];
 
 export function isYes(text: string): boolean {
-  return hasIntentWord(text, YES_WORDS);
+  return matchesIntent(text, YES_TOKENS);
 }
 
 export function isNo(text: string): boolean {
-  return hasIntentWord(text, NO_WORDS);
+  return matchesIntent(text, NO_TOKENS);
 }
