@@ -267,21 +267,14 @@ export default function VoiceRegistrationPage() {
 
   // ─── Render: Success ───────────────────────────────────────────────────────
   if (step === 'success' && registrationResult) {
-    // Voice path → straight to the AI Voice Booking agent (patient is auto-logged-in).
-    const params = new URLSearchParams({
-      patientId: registrationResult.patientId,
-      organisationId: registrationResult.organisationId,
-      patientName: registrationResult.patientName,
-      language: registrationResult.language,
-    });
-    const bookingUrl = `/patient/appointment/voice?${params.toString()}`;
-
+    // Route to the "Choose Next Step" interstitial. The patient is auto-logged-in,
+    // so the booking pages resolve their identity from the session.
     return (
       <RegistrationSuccess
         patientId={successPatientId}
         password={successPassword}
-        redirectTo={bookingUrl}
-        ctaLabel="Start Booking Now"
+        redirectTo="/patient/appointments/choose-method"
+        ctaLabel="Continue"
       />
     );
   }

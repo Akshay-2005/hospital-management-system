@@ -17,6 +17,7 @@ const STATE_LABELS: Record<FSMState, string> = {
   GREETING: 'Welcome',
   COLLECT_FIELD: 'Collecting information',
   CONFIRM_FIELD: 'Confirming',
+  REVIEW: 'Review & confirm',
   MANUAL_FALLBACK: 'Manual input needed',
   NEXT_OR_SAVE: 'All fields collected',
   SAVE_PATIENT: 'Saving registration',

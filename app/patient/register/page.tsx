@@ -72,8 +72,8 @@ function RegisterForm() {
             <RegistrationSuccess
                 patientId={success.patient_id}
                 password={success.password}
-                redirectTo="/patient/dashboard"
-                ctaLabel="Go to Dashboard"
+                redirectTo="/patient/appointments/choose-method"
+                ctaLabel="Continue"
             />
         );
     }

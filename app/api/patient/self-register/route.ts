@@ -120,10 +120,15 @@ export async function POST(request: NextRequest) {
             organizationId: org.id,
         });
 
-        // Send welcome email (non-blocking): Patient ID + change-password link only.
+        // Send welcome email: Patient ID + change-password link only.
+        // Awaited (not fire-and-forget) so it actually dispatches before the
+        // serverless function freezes; failure is non-fatal to registration.
         if (email && email !== 'not given') {
-            sendWelcomeEmail(email, full_name, patientId, tokenResult.setupLink, org.id, org.name)
-                .catch(err => console.error('[Self-Register Email]', err));
+            try {
+                await sendWelcomeEmail(email, full_name, patientId, tokenResult.setupLink, org.id, org.name);
+            } catch (err) {
+                console.error('[Self-Register Email] Failed to send welcome email:', err);
+            }
         }
 
         // Silently authenticate the patient by issuing the session cookie now,

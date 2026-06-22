@@ -28,6 +28,11 @@ export interface VoicePrompts {
   selectFromList: (options: string[]) => string;
   noMatchRetry: (options: string[]) => string;
   
+  // Review & edit (final confirmation before save)
+  reviewSummary: (pairs: Array<{ label: string; value: string }>) => string;
+  reviewConfirm: string;
+  reviewWhichField: string;
+
   // Completion
   allFieldsDone: string;
   savingPatient: string;
@@ -99,13 +104,18 @@ const EN: VoicePrompts = {
     return `I didn't recognise that. Below are the options — ${numbered}. Say the number or name.`;
   },
   
+  reviewSummary: (pairs) =>
+    'Here is what I have. ' + pairs.map(p => `${p.label} is ${p.value}`).join('. ') + '.',
+  reviewConfirm: 'Shall I save this registration? Say "yes" to confirm, or tell me which field you would like to change.',
+  reviewWhichField: 'Which field would you like to edit? For example, say name, phone, age, or address.',
+
   allFieldsDone: 'All your details have been collected. Let me save your registration now.',
   savingPatient: 'Saving your registration, please wait...',
   saveSuccess: (patientId: string) => `Registration successful! Your patient ID is ${patientId}. Please save this ID.`,
   saveError: 'There was an error saving your registration. Please try again or use the form on screen to submit.',
-  
+
   derivedAge: (age: string, dob: string) => `Based on your date of birth ${formatDateForSpeech(dob, 'en')}, your age is ${age} years. Is that correct?`,
-  
+
   skipPrompt: 'Say "skip" to leave this field blank, or provide a value.',
 };
 
@@ -148,6 +158,11 @@ const HI: VoicePrompts = {
     return `मैं वह नहीं पहचान पाई। नीचे विकल्प हैं — ${numbered}। नंबर या नाम बोलें।`;
   },
   
+  reviewSummary: (pairs) =>
+    'मैंने यह जानकारी दर्ज की है। ' + pairs.map(p => `${p.label} ${p.value} है`).join('। ') + '।',
+  reviewConfirm: 'क्या मैं यह पंजीकरण सहेज दूँ? पुष्टि के लिए "हाँ" कहें, या बताएं कि आप कौन सा विवरण बदलना चाहते हैं।',
+  reviewWhichField: 'आप कौन सा विवरण बदलना चाहते हैं? जैसे नाम, फ़ोन, उम्र, या पता बोलें।',
+
   allFieldsDone: 'आपकी सभी जानकारी एकत्र हो गई है। अब मैं आपका पंजीकरण सहेज रही हूँ।',
   savingPatient: 'पंजीकरण सहेजा जा रहा है, कृपया प्रतीक्षा करें...',
   saveSuccess: (patientId: string) => `पंजीकरण सफल! आपकी मरीज़ आईडी ${patientId} है। कृपया इसे सहेजें।`,
