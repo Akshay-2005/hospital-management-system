@@ -553,13 +553,25 @@ function VoiceBookingPageInner({
       // Read out the available doctors
       const doctorList = doctors
         .slice(0, 3) // Read max 3 to avoid overwhelming the patient
-        .map((d, i) => `Doctor ${i + 1}: Dr. ${d.name}, ${d.specialty}`)
+        .map((d, i) => `Doctor ${i + 1}: Doctor ${d.name.replace(/^Dr\.?\s*/i, '')}, ${d.specialty}`)
         .join('. ');
       await speak(`I found ${doctors.length} doctor${doctors.length > 1 ? 's' : ''}. ${doctorList}. Please tap a doctor card to select, or say the doctor number.`);
 
       // Listen for voice selection
-      const { text: voiceChoice } = await listen();
-      const chosenDoctor = parseVoiceDoctorChoice(voiceChoice, doctors);
+      let retries = 0;
+      let chosenDoctor = null;
+
+      while (retries < 3) {
+        const { text: voiceChoice } = await listen();
+        chosenDoctor = parseVoiceDoctorChoice(voiceChoice, doctors);
+        
+        if (chosenDoctor) break;
+
+        retries++;
+        if (retries < 3) {
+          await speak("I didn't catch that. Please say the doctor's name or number.");
+        }
+      }
 
       if (chosenDoctor) {
         await handleDoctorSelected(chosenDoctor);
@@ -602,7 +614,8 @@ function VoiceBookingPageInner({
     dispatch({ type: 'DOCTOR_SELECTED', doctor });
     dispatch({ type: 'DATE_STEP_START' });
 
-    await speak(`Great choice! Dr. ${doctor.name}. What date would you like to book? You can say a specific date like 25 June, or say today or tomorrow.`);
+    const safeName = doctor.name.replace(/^Dr\.?\s*/i, '');
+    await speak(`Great choice! Doctor ${safeName}. What date would you like to book? You can say a specific date like 25 June, or say today or tomorrow.`);
 
     await runDateStep(doctor);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -612,6 +625,7 @@ function VoiceBookingPageInner({
     if (!text) return null;
     const lower = text.toLowerCase().trim();
     const today = new Date();
+    const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
     const formatDate = (d: Date) => {
       const offset = d.getTimezoneOffset() * 60000;
@@ -675,7 +689,7 @@ function VoiceBookingPageInner({
         if (day >= 1 && day <= 31) {
           const yr = today.getFullYear();
           const d = new Date(yr, foundMonth, day);
-          if (d < today) d.setFullYear(yr + 1);
+          if (d < todayMidnight) d.setFullYear(yr + 1);
           if (!isNaN(d.getTime())) return formatDate(d);
         }
       }
@@ -684,7 +698,7 @@ function VoiceBookingPageInner({
         if (lower.includes(word)) {
           const yr = today.getFullYear();
           const d = new Date(yr, foundMonth, day);
-          if (d < today) d.setFullYear(yr + 1);
+          if (d < todayMidnight) d.setFullYear(yr + 1);
           if (!isNaN(d.getTime())) return formatDate(d);
         }
       }
@@ -710,8 +724,8 @@ function VoiceBookingPageInner({
     if (chosenDate) {
       await handleDateSelected(doctor, chosenDate);
     } else {
-      dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
       await speak('I didn\'t catch that. Please say a date like 25 June, or pick one below.');
+      await runDateStep(doctor);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listen, speak]);
@@ -751,7 +765,9 @@ function VoiceBookingPageInner({
         nextAvailableDate,
       });
 
-      if (slots.length === 0) {
+      const availableSlots = slots.filter((s: any) => s.isAvailable !== false);
+
+      if (availableSlots.length === 0) {
         if (nextAvailableDate) {
           await speak(
             `No slots available for ${formatDateSpoken(dateStr)}. The next available date is ${formatDateSpoken(nextAvailableDate)}. Tap the button to view those slots.`
@@ -764,10 +780,13 @@ function VoiceBookingPageInner({
         return;
       }
 
-      // Read first 3 slots
-      const slotList = slots
+      // Read first 3 available slots with their visual index
+      const slotList = availableSlots
         .slice(0, 3)
-        .map((s, i) => `Slot ${i + 1}: ${formatTimeSpoken(s.startTime)}`)
+        .map(s => {
+          const originalIndex = slots.findIndex(slot => slot.id === s.id) + 1;
+          return `Slot ${originalIndex}: ${formatTimeSpoken(s.startTime)}`;
+        })
         .join('. ');
       await speak(`Here are the available slots for ${formatDateSpoken(dateStr)}. ${slotList}. Please tap a slot or say the slot number.`);
 
@@ -776,10 +795,15 @@ function VoiceBookingPageInner({
       const chosenSlot = parseVoiceSlotChoice(voiceChoice, slots);
 
       if (chosenSlot) {
-        await handleSlotSelected(chosenSlot, doctor);
+        if ((chosenSlot as any).isAvailable === false) {
+          await speak('That slot is not available. Please choose a different time slot.');
+          await runSlotStep(doctor, dateStr);
+        } else {
+          await handleSlotSelected(chosenSlot, doctor);
+        }
       } else {
-        dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
-        await speak('Please tap a time slot to make your selection.');
+        await speak('I didn\'t catch that. Please say the slot number or time.');
+        await runSlotStep(doctor, dateStr);
       }
 
     } catch (err) {
@@ -793,11 +817,21 @@ function VoiceBookingPageInner({
   function parseVoiceSlotChoice(text: string, slots: SlotCard[]): SlotCard | null {
     if (!text) return null;
     const lower = text.toLowerCase();
-    const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth'];
-    const cardinals = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
+
+    // Check for explicit number mentions like "25" or "slot 25"
+    const numMatch = lower.match(/\b(\d+)\b/);
+    if (numMatch) {
+      const num = parseInt(numMatch[1], 10);
+      if (num >= 1 && num <= slots.length) {
+        return slots[num - 1];
+      }
+    }
+
+    const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+    const cardinals = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
     for (let i = 0; i < ordinals.length; i++) {
       const cardinalRegex = new RegExp(`\\b${cardinals[i]}\\b`);
-      if (lower.includes(ordinals[i]) || lower.includes(String(i + 1)) || cardinalRegex.test(lower)) {
+      if (lower.includes(ordinals[i]) || cardinalRegex.test(lower)) {
         return slots[i] ?? null;
       }
     }

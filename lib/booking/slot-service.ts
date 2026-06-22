@@ -73,12 +73,21 @@ export async function getAvailableSlotsForDoctor(
       return { success: false, slots: [], date: dateStr, error: 'Failed to load slots' };
     }
 
-    // Filter to only truly available slots
-    const available: SlotCard[] = (result.data as any[])
-      .filter((s: any) => s.is_available === true && s.is_booked === false)
-      .map(mapToSlotCard);
+    const now = new Date();
+    
+    // Return all slots but mark them as available or not
+    const allSlots = (result.data as any[]).map(s => {
+      const card = mapToSlotCard(s);
+      const isBooked = s.is_booked === true || s.is_available === false;
+      const slotDateTime = new Date(`${dateStr}T${s.start_time}:00`);
+      const isPast = slotDateTime <= now;
+      
+      // We will attach an extra property (even if not strictly in the base contract)
+      (card as any).isAvailable = !isBooked && !isPast;
+      return card;
+    });
 
-    return { success: true, slots: available, date: dateStr };
+    return { success: true, slots: allSlots, date: dateStr };
   } catch (error) {
     console.error('[SlotService] getAvailableSlotsForDoctor error:', error);
     return {
@@ -137,7 +146,8 @@ export async function findNextAvailableDate(
     const dateStr = next.toISOString().split('T')[0];
 
     const result = await getAvailableSlotsForDoctor(organisationId, doctorId, dateStr);
-    if (result.success && result.slots.length > 0) {
+    const hasAvailable = result.success && result.slots.some((s: any) => s.isAvailable !== false);
+    if (hasAvailable) {
       return dateStr;
     }
   }

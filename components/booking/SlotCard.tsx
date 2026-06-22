@@ -199,7 +199,7 @@ export function SlotCardList({
         <CalendarDays className="w-3.5 h-3.5" aria-hidden="true" />
         {formatDateLabel(date)}
         <span className="ml-1 px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold">
-          {slots.length} available
+          {slots.filter((s: any) => s.isAvailable !== false).length} available
         </span>
       </p>
 
@@ -215,7 +215,7 @@ export function SlotCardList({
               slot={slot}
               index={i + 1}
               isSelected={selectedSlotId === slot.id}
-              isDisabled={isDisabled}
+              isDisabled={isDisabled || (slot as any).isAvailable === false}
               onSelect={onSelect}
             />
           </div>
