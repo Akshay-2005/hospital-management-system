@@ -464,7 +464,10 @@ export async function listenOnce(
           detectSilence();
         })
         .catch((err) => {
-          console.error('[STT-WS] AudioWorklet load failed:', err);
+          // Use warn (not error): the AbortError here is gracefully handled by
+          // the ScriptProcessor fallback, but Next.js Turbopack renders a
+          // full-screen error overlay for any console.error in dev.
+          console.warn('[STT-WS] AudioWorklet load failed, falling back to ScriptProcessor:', err?.message ?? err);
           startScriptProcessorFallback();
         });
     };
