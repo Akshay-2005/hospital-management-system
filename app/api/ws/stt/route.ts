@@ -134,7 +134,7 @@ async function transcribeWithGroq(
 
   try {
     // The OpenAI SDK accepts a `File` object — construct one from our buffer.
-    const audioFile = new File([wavBuffer], fileName, { type: 'audio/wav' });
+    const audioFile = new File([new Uint8Array(wavBuffer)], fileName, { type: 'audio/wav' });
 
     const response = await groq.audio.transcriptions.create({
       file: audioFile,
