@@ -199,6 +199,15 @@ export async function speakText(
 
     let resolved = false;
 
+    /**
+     * Serialized scheduling chain. Chunks arrive from the server in sentence
+     * order, but arrayBuffer()/decodeAudioData() are async and finish at
+     * different times (shorter clips decode faster). Each chunk's scheduling
+     * step is chained onto this promise so nextPlayTime slots are claimed in
+     * arrival order — see enqueueChunk() below for the full rationale.
+     */
+    let scheduleChain: Promise<void> = Promise.resolve();
+
     // Guard: only resolve once, and only if this session is still active.
     const safeResolve = () => {
       if (resolved || sessionId !== mySessionId) return;
@@ -272,7 +281,14 @@ export async function speakText(
         };
 
         source.start(safeStart);
-        nextPlayTime = safeStart + audioBuffer.duration;
+        // Shave a little off each chunk's tail when advancing the clock so the
+        // next sentence starts before this one's trailing silence finishes.
+        // Sarvam pads each per-sentence WAV with sentence-final silence; with
+        // gapless sequential playback that padding stacks up and sounds slow.
+        // Trimming ~0.1s removes the dead air without clipping speech (we never
+        // trim more than the buffer is long).
+        const TAIL_TRIM = 0.1; // seconds of inter-sentence padding to remove
+        nextPlayTime = safeStart + Math.max(audioBuffer.duration - TAIL_TRIM, 0.05);
 
         console.log(
           `[TTS] Chunk scheduled at ${safeStart.toFixed(3)}s, ` +
@@ -289,6 +305,38 @@ export async function speakText(
       });
     };
 
+    // ── enqueueChunk: ordered scheduler ─────────────────────────────────────
+    //
+    // The server streams one binary frame per sentence, in sentence order. But
+    // converting a Blob to an ArrayBuffer and then decodeAudioData() are BOTH
+    // async, and they resolve at different times — a short trailing sentence
+    // (e.g. "Say yes to continue.") decodes faster than a long opening one.
+    //
+    // scheduleChunk() claims the next slot on the AudioContext clock
+    // (nextPlayTime) at the moment its decode finishes. If we let each chunk
+    // schedule itself the instant it decoded, the fastest-decoding clip would
+    // grab the earliest slot and play FIRST — which is exactly the "sentences
+    // come out shuffled" bug.
+    //
+    // Fix: chain the scheduling so each chunk claims its slot strictly in
+    // arrival (sentence) order. Decode work still overlaps network I/O for the
+    // next frame; only the brief slot-assignment is serialized, so there is no
+    // audible gap.
+    const enqueueChunk = (abPromise: Promise<ArrayBuffer>) => {
+      scheduleChain = scheduleChain.then(() =>
+        abPromise
+          .then((ab) => scheduleChunk(ab))
+          .catch((err) => {
+            console.warn('[TTS] chunk convert/schedule failed:', err);
+            // Conversion failed before scheduleChunk could run — count it as
+            // ended so checkDone() can still resolve the session.
+            if (sessionId !== mySessionId) return;
+            chunksEnded++;
+            checkDone();
+          }),
+      );
+    };
+
     // ── Socket event handlers ──────────────────────────────────────────────
 
     socket.onopen = () => {
@@ -301,27 +349,14 @@ export async function speakText(
 
       if (event.data instanceof Blob) {
         // Binary frame = WAV/MP3 audio for one sentence.
+        // Enqueue in arrival order so playback order matches sentence order.
         chunksReceived++;
-        event.data
-          .arrayBuffer()
-          .then((ab) => scheduleChunk(ab))
-          .catch((err) => {
-            console.warn('[TTS] Blob decode failed:', err);
-            // Count as ended so checkDone() can still fire.
-            if (sessionId !== mySessionId) return;
-            chunksEnded++;
-            checkDone();
-          });
+        enqueueChunk(event.data.arrayBuffer());
 
       } else if (event.data instanceof ArrayBuffer) {
         // Some environments deliver binary directly as ArrayBuffer.
         chunksReceived++;
-        scheduleChunk(event.data).catch((err) => {
-          console.warn('[TTS] ArrayBuffer decode failed:', err);
-          if (sessionId !== mySessionId) return;
-          chunksEnded++;
-          checkDone();
-        });
+        enqueueChunk(Promise.resolve(event.data));
 
       } else if (typeof event.data === 'string') {
         // JSON control frame
@@ -453,7 +488,6 @@ function fallbackSpeak(
     return;
   }
 
-  const langCode = TTS_LANG_MAP[language] || 'en-IN';
   let resolved = false;
   const safeResolve = () => {
     if (!resolved) {
@@ -463,39 +497,27 @@ function fallbackSpeak(
   };
 
   const doSpeak = () => {
+    // Clear any stale queue once before we begin this fallback utterance(s).
     window.speechSynthesis.cancel();
 
     const MAX_CHUNK = 200;
     if (text.length > MAX_CHUNK) {
+      // Long text — split into sentence-sized chunks and read them in order.
+      //
+      // speakChunks() speaks each chunk DIRECTLY via speakUtteranceOnce(),
+      // NOT via speakText(). speakText() begins with stopSpeaking(), which
+      // bumps the module-level sessionId; calling it recursively here would
+      // strand the caller's speakText() promise (its captured mySessionId
+      // would no longer match, so its safeResolve becomes a permanent no-op)
+      // and shuffle the chunk order. Speaking utterances directly keeps the
+      // sequence ordered and lets the caller's promise resolve normally.
       const chunks = splitIntoChunks(text, MAX_CHUNK);
       speakChunks(chunks, language).then(safeResolve);
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = langCode;
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-
-    const voice = findBestVoice(language);
-    if (voice) {
-      utterance.voice = voice;
-      console.log(`[TTS] Browser fallback using voice: ${voice.name} (${voice.lang})`);
-    } else {
-      console.warn(`[TTS] No voice found for ${langCode}, using default`);
-    }
-
-    utterance.onend = safeResolve;
-    utterance.onerror = (e) => {
-      console.warn('[TTS] Browser SpeechSynthesis error:', e);
-      safeResolve();
-    };
-
-    window.speechSynthesis.speak(utterance);
-
-    // Safety timeout — some browsers never fire onend
-    setTimeout(safeResolve, Math.max(text.length * 80, 5000));
+    // Short text — a single utterance is enough.
+    speakUtteranceOnce(text, language).then(safeResolve);
   };
 
   const voices = window.speechSynthesis.getVoices();
@@ -512,6 +534,54 @@ function fallbackSpeak(
       doSpeak();
     }, 1000);
   }
+}
+
+/**
+ * Speak a single piece of text via the browser SpeechSynthesis engine and
+ * resolve when it finishes (onend), errors (onerror), or a safety timeout
+ * elapses.
+ *
+ * This helper deliberately does NOT touch the module-level sessionId /
+ * stopSpeaking() machinery, so it is safe to call sequentially in a loop
+ * without invalidating the caller's speakText() session. Interruption is
+ * handled one level up in speakChunks(), which checks sessionId between
+ * chunks. A direct stopSpeaking() (barge-in / navigation) calls
+ * window.speechSynthesis.cancel(), which fires the active utterance's
+ * onend/onerror and resolves this promise promptly.
+ */
+function speakUtteranceOnce(text: string, language: LanguageCode): Promise<void> {
+  return new Promise((resolve) => {
+    if (!isTTSSupported()) { resolve(); return; }
+
+    const langCode = TTS_LANG_MAP[language] || 'en-IN';
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = langCode;
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    const voice = findBestVoice(language);
+    if (voice) {
+      utterance.voice = voice;
+      console.log(`[TTS] Browser fallback using voice: ${voice.name} (${voice.lang})`);
+    } else {
+      console.warn(`[TTS] No voice found for ${langCode}, using default`);
+    }
+
+    utterance.onend = finish;
+    utterance.onerror = (e) => {
+      console.warn('[TTS] Browser SpeechSynthesis error:', e);
+      finish();
+    };
+
+    window.speechSynthesis.speak(utterance);
+
+    // Safety timeout — some browsers never fire onend
+    setTimeout(finish, Math.max(text.length * 80, 5000));
+  });
 }
 
 function splitIntoChunks(text: string, maxLen: number): string[] {
@@ -531,9 +601,27 @@ function splitIntoChunks(text: string, maxLen: number): string[] {
   return chunks;
 }
 
+/**
+ * Speak a list of text chunks sequentially via the browser SpeechSynthesis
+ * fallback, in order (chunk 0, then chunk 1, …).
+ *
+ * IMPORTANT: this must NOT call speakText() — that would call stopSpeaking(),
+ * bump the module-level sessionId, and both (a) strand the caller's promise
+ * and (b) reorder/cut off playback. Each chunk is spoken directly via
+ * speakUtteranceOnce().
+ *
+ * Barge-in / navigation: we snapshot the current sessionId and bail before
+ * speaking the next chunk if it has advanced (i.e. stopSpeaking() ran because
+ * the user navigated away or a new speakText() started). This stops the
+ * remaining chunks from being read after a legitimate interruption.
+ */
 async function speakChunks(chunks: string[], language: LanguageCode): Promise<void> {
+  const mySessionId = sessionId;
   for (const chunk of chunks) {
-    await speakText(chunk, language);
+    // Interruption guard — stop reading the rest of the sequence if this
+    // session was invalidated while the previous chunk was playing.
+    if (sessionId !== mySessionId) return;
+    await speakUtteranceOnce(chunk, language);
   }
 }
 

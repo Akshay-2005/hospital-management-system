@@ -1,13 +1,71 @@
 'use client';
 
-import React from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { User, Mic, LayoutDashboard, ArrowLeft } from 'lucide-react';
 
+type View = 'menu' | 'language';
+
 export default function ChooseBookingMethodPage() {
     const router = useRouter();
+    const [view, setView] = useState<View>('menu');
 
+    // Navigate to the voice booking flow in the chosen language. patientId /
+    // organisationId are resolved server-side from the session by the voice
+    // page, so we only need to pass the language here.
+    const startVoiceBooking = (language: 'en' | 'hi') => {
+        router.push(`/patient/appointment/voice?language=${language}`);
+    };
+
+    // ─── Language selection sub-view ───────────────────────────────────────────
+    if (view === 'language') {
+        return (
+            <div className="min-h-screen bg-[#fafaf8] py-10 px-4">
+                <div className="max-w-2xl mx-auto">
+                    <button
+                        onClick={() => setView('menu')}
+                        className="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6"
+                    >
+                        <ArrowLeft className="w-4 h-4" /> Back
+                    </button>
+
+                    <div className="bg-white rounded-3xl shadow-[var(--shadow-lg)] border border-gray-200/60 overflow-hidden">
+                        <div className="bg-gradient-to-r from-blue-600 to-indigo-700 px-8 py-8 text-white text-center">
+                            <h1 className="text-2xl font-black">Choose Your Language</h1>
+                            <p className="text-blue-100 text-sm mt-1">The assistant will speak to you in this language</p>
+                        </div>
+
+                        <div className="p-8 space-y-4">
+                            <button
+                                onClick={() => startVoiceBooking('en')}
+                                className="w-full py-5 px-6 border-2 border-gray-200 rounded-2xl hover:border-indigo-400 hover:bg-indigo-50/50 transition-all flex items-center gap-4 group"
+                            >
+                                <span className="text-3xl">🇬🇧</span>
+                                <div className="text-left">
+                                    <span className="font-bold text-gray-800 group-hover:text-indigo-700 text-lg block">English</span>
+                                    <p className="text-sm text-gray-500">I&apos;ll help you book in English</p>
+                                </div>
+                            </button>
+
+                            <button
+                                onClick={() => startVoiceBooking('hi')}
+                                className="w-full py-5 px-6 border-2 border-gray-200 rounded-2xl hover:border-indigo-400 hover:bg-indigo-50/50 transition-all flex items-center gap-4 group"
+                            >
+                                <span className="text-3xl">🇮🇳</span>
+                                <div className="text-left">
+                                    <span className="font-bold text-gray-800 group-hover:text-indigo-700 text-lg block">हिन्दी</span>
+                                    <p className="text-sm text-gray-500">मैं हिन्दी में आपकी मदद करूँगी</p>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // ─── Main method menu ──────────────────────────────────────────────────────
     return (
         <div className="min-h-screen bg-[#fafaf8] py-10 px-4">
             <div className="max-w-2xl mx-auto">
@@ -27,7 +85,7 @@ export default function ChooseBookingMethodPage() {
 
                     <div className="p-8 space-y-4">
                         <button
-                            onClick={() => router.push('/patient/appointment/voice')}
+                            onClick={() => setView('language')}
                             className="w-full py-5 px-6 border-2 border-gray-200 rounded-2xl hover:border-indigo-400 hover:bg-indigo-50/50 transition-all flex items-center gap-4 group text-left"
                         >
                             <div className="w-12 h-12 bg-indigo-100 rounded-full flex items-center justify-center shrink-0">

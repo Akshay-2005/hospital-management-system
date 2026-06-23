@@ -78,6 +78,8 @@ export async function POST(req: Request) {
           text: sanitizedText,
           target_language_code: targetLang as any,
           speaker: speaker,
+          // Slightly faster than the 1.0 default so the assistant sounds snappier.
+          pace: 1.1,
         });
 
         console.log('[TTS] ✅ Sarvam succeeded');

@@ -94,6 +94,8 @@ async function fetchSarvamWav(
       text: sentence,
       target_language_code: targetLang as any,
       speaker: 'ritu',
+      // Slightly faster than the 1.0 default so the assistant sounds snappier.
+      pace: 1.1,
     });
 
     // Sarvam returns { audios: string[] } — each element is a base64 WAV.

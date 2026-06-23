@@ -395,6 +395,54 @@ export function deriveAgeFromDOB(isoDate: string): string {
 }
 
 /**
+ * Spoken/typed number words → position, including the common Indian-English
+ * STT misrecognitions of the short number words. Indian-English speech
+ * recognition very frequently transcribes spoken "one" as "when", "won",
+ * "van" or "wan"; "two" as "to"/"too"; "three" as "tree"/"free"; etc. Because
+ * list/enum selection asks the user to "say the number or name", we accept
+ * these homophones so a clear "one" isn't rejected.
+ */
+const NUMBER_WORDS: Record<string, number> = {
+  // English number words
+  'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+  'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+  // English ordinals
+  'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5,
+  'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10,
+  // Common STT homophones / misrecognitions of the short number words
+  'won': 1, 'when': 1, 'van': 1, 'wan': 1, 'juan': 1, 'wun': 1, 'whan': 1,
+  'to': 2, 'too': 2, 'tu': 2, 'tou': 2,
+  'tree': 3, 'free': 3, 'thri': 3, 'thee': 3,
+  'for': 4, 'fore': 4, 'foar': 4,
+  'ate': 8,
+  // Romanised Hindi
+  'ek': 1, 'do': 2, 'teen': 3, 'char': 4, 'paanch': 5,
+  // Devanagari Hindi words
+  'एक': 1, 'दो': 2, 'तीन': 3, 'चार': 4, 'पांच': 5, 'पाँच': 5,
+  // Devanagari digits
+  '१': 1, '२': 2, '३': 3, '४': 4, '५': 5,
+};
+
+/**
+ * Parse a spoken/typed selection into a 1-based number, tolerating trailing
+ * punctuation (STT often appends "?" or "."), digit input, spelled-out words
+ * and common homophones. Returns null when no number can be found.
+ */
+function wordToNumber(text: string): number | null {
+  // Direct integer ("1", "2", …)
+  const direct = parseInt(text.trim(), 10);
+  if (!isNaN(direct)) return direct;
+
+  // Word-based — strip punctuation off each token, first match wins.
+  const words = text.toLowerCase().split(/\s+/);
+  for (const raw of words) {
+    const w = raw.replace(/[.,?!।॥]/g, '');
+    if (NUMBER_WORDS[w]) return NUMBER_WORDS[w];
+  }
+  return null;
+}
+
+/**
  * Match a spoken value against an enum list using fuzzy matching.
  */
 function matchEnum(input: string, values: string[]): string | null {
@@ -408,28 +456,9 @@ function matchEnum(input: string, values: string[]): string | null {
   const partial = values.find(v => v.toLowerCase().startsWith(lower) || lower.startsWith(v.toLowerCase()));
   if (partial) return partial;
 
-  // Number-based selection: "1", "2", "3"
-  let num = parseInt(lower, 10);
-  if (isNaN(num)) {
-    // Try word-to-number mapping
-    const numberWords: Record<string, number> = {
-      'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-      'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-      'first': 1, 'second': 2, 'third': 3,
-      'ek': 1, 'do': 2, 'teen': 3, 'char': 4, 'paanch': 5,
-      'एक': 1, 'दो': 2, 'तीन': 3, 'चार': 4, 'पांच': 5, 'पाँच': 5,
-      '१': 1, '२': 2, '३': 3, '४': 4, '५': 5
-    };
-    const words = lower.split(/\s+/);
-    for (const w of words) {
-      if (numberWords[w]) {
-        num = numberWords[w];
-        break;
-      }
-    }
-  }
-
-  if (!isNaN(num) && num >= 1 && num <= values.length) {
+  // Number-based selection: "1", "two", "when" (STT for "one"), etc.
+  const num = wordToNumber(lower);
+  if (num !== null && num >= 1 && num <= values.length) {
     return values[num - 1];
   }
 
@@ -506,28 +535,10 @@ function matchFromList(input: string, options: string[]): string | null {
   const contains = options.find(o => o.toLowerCase().includes(lower) || lower.includes(o.toLowerCase()));
   if (contains) return contains;
 
-  // Number-based selection
-  let num = parseInt(lower, 10);
-  if (isNaN(num)) {
-    // Try word-to-number mapping
-    const numberWords: Record<string, number> = {
-      'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-      'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-      'first': 1, 'second': 2, 'third': 3,
-      'ek': 1, 'do': 2, 'teen': 3, 'char': 4, 'paanch': 5,
-      'एक': 1, 'दो': 2, 'तीन': 3, 'चार': 4, 'पांच': 5, 'पाँच': 5,
-      '१': 1, '२': 2, '३': 3, '४': 4, '५': 5
-    };
-    const words = lower.split(/\s+/);
-    for (const w of words) {
-      if (numberWords[w]) {
-        num = numberWords[w];
-        break;
-      }
-    }
-  }
-
-  if (!isNaN(num) && num >= 1 && num <= options.length) {
+  // Number-based selection (digits, spelled-out words, or STT homophones
+  // like "when"/"won"/"van" for "one")
+  const num = wordToNumber(lower);
+  if (num !== null && num >= 1 && num <= options.length) {
     return options[num - 1];
   }
 

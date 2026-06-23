@@ -6,6 +6,7 @@
     "node": "22.x"
   },
   "scripts": {
+    "prepare": "next-ws patch",
     "predev": "node scripts/check-deps-sync.js && prisma generate",
     "dev": "next dev",
     "dev:fresh": "npm run clean && npm install && npm run dev",

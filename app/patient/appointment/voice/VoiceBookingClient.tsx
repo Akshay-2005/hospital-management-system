@@ -42,6 +42,7 @@ import type {
 
 import { createVoiceSession } from '@/lib/voice/session';
 import { isYes, isNo } from '@/lib/registration/field-specs';
+import { getBookingPrompts, formatDateSpoken, formatTimeSpoken } from '@/lib/voice/booking-i18n';
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -382,6 +383,10 @@ function VoiceBookingPageInner({
   // ── Reducer ────────────────────────────────────────────────────────────────
   const [state, dispatch] = useReducer(bookingReducer, initialState);
 
+  // ── Bilingual prompts (keyed by the session language en|hi) ─────────────────
+  const lang = registration.language;
+  const prompts = getBookingPrompts(lang);
+
   // ── VoiceSession (singleton ref — created once, browser-only) ─────────────
   const voiceSessionRef = useRef<VoiceSession | null>(null);
 
@@ -429,9 +434,7 @@ function VoiceBookingPageInner({
   const runSymptomStep = useCallback(async (skipGreeting = false) => {
     if (!skipGreeting) {
       const firstName = registration.patientName.split(' ')[0];
-      await speak(
-        `Hello ${firstName}! I'm your AI booking assistant. Please describe your symptoms, and I'll find the right doctor for you.`
-      );
+      await speak(prompts.welcome(firstName));
     }
 
     // Listen for symptoms
@@ -444,18 +447,21 @@ function VoiceBookingPageInner({
     }
 
     if (!symptomText.trim()) {
-      await speak('I didn\'t catch that. Could you please describe your symptoms?');
+      await speak(prompts.symptomRetry);
       dispatch({ type: 'GO_TO_SYMPTOMS' });
       return;
     }
 
     // Analyse symptoms via NLU API
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'thinking' });
-    await speak('Got it. Let me analyse your symptoms…');
+    await speak(prompts.analysing);
     try {
       const payload = {
         symptomText,
         organisationId: registration.organisationId,
+        // Tell the NLU service which language the patient spoke so the
+        // reasoning string it returns can be localised (EN/HI).
+        language: lang,
       };
 
       const nluRes = await fetch('/api/voice/nlu/symptoms', {
@@ -470,9 +476,7 @@ function VoiceBookingPageInner({
       // Emergency detection — highest priority
       if (nlu.isEmergency) {
         dispatch({ type: 'EMERGENCY_DETECTED', redFlags: nlu.redFlags ?? [] });
-        await speak(
-          'I have detected emergency symptoms in what you described. Please call 108 or go to the nearest emergency room immediately.'
-        );
+        await speak(prompts.emergency);
         return;
       }
 
@@ -484,7 +488,9 @@ function VoiceBookingPageInner({
       if (isLowConfidence) {
         const availableSpecialties: string[] = nlu.availableSpecialties ?? [];
         const reasoning: string = nlu.reasoning
-          || 'I wasn\'t sure which department would suit you best.';
+          || (lang === 'hi'
+            ? 'मुझे यकीन नहीं था कि कौन सा विभाग आपके लिए सबसे उपयुक्त होगा।'
+            : 'I wasn\'t sure which department would suit you best.');
 
         dispatch({
           type: 'LOW_CONFIDENCE_DETECTED',
@@ -495,10 +501,7 @@ function VoiceBookingPageInner({
 
         // Speak the uncertainty reason + ask patient to pick
         const departmentList = availableSpecialties.slice(0, 5).join(', ');
-        await speak(
-          `${reasoning} Could you describe your symptoms in a bit more detail, or please tap a department from the list below to continue.`
-          + (departmentList ? ` Available departments include: ${departmentList}.` : '')
-        );
+        await speak(prompts.lowConfidence(reasoning, departmentList));
         return;
       }
 
@@ -511,12 +514,12 @@ function VoiceBookingPageInner({
       });
 
       const specialty = nlu.specialties[0];
-      await speak(`Based on your symptoms, I'll look for a ${specialty} specialist.`);
+      await speak(prompts.routingToSpecialty(specialty));
       await runDoctorStep(specialty);
 
     } catch (err) {
       console.error('[VoiceBooking] Symptom NLU error:', err);
-      await speak('I had trouble analysing your symptoms. Please try again.');
+      await speak(prompts.symptomError);
       dispatch({ type: 'GO_TO_SYMPTOMS' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -542,25 +545,23 @@ function VoiceBookingPageInner({
       dispatch({ type: 'DOCTORS_LOADED', doctors });
 
       if (doctors.length === 0) {
-        await speak(
-          `I couldn't find any ${specialty} doctors available right now. Let me look for a General Medicine doctor.`
-        );
+        await speak(prompts.noDoctorsRetryGeneral(specialty));
         // Retry with General Medicine
         if (specialty !== 'General Medicine') {
           await runDoctorStep('General Medicine');
           return;
         }
-        await speak('No doctors are available at this time. Please try again later or call the reception.');
-        dispatch({ type: 'SET_ERROR', message: 'No doctors available. Please contact reception.' });
+        await speak(prompts.noDoctorsAtAll);
+        dispatch({ type: 'SET_ERROR', message: prompts.noDoctorsErrorDisplay });
         return;
       }
 
       // Read out the available doctors
       const doctorList = doctors
         .slice(0, 3) // Read max 3 to avoid overwhelming the patient
-        .map((d, i) => `Doctor ${i + 1}: Doctor ${d.name.replace(/^Dr\.?\s*/i, '')}, ${d.specialty}`)
+        .map((d, i) => prompts.doctorLabel(i + 1, d.name.replace(/^Dr\.?\s*/i, ''), d.specialty))
         .join('. ');
-      await speak(`I found ${doctors.length} doctor${doctors.length > 1 ? 's' : ''}. ${doctorList}. Please tap a doctor card to select, or say the doctor number.`);
+      await speak(prompts.doctorList(doctors.length, doctorList));
 
       // Listen for voice selection
       let retries = 0;
@@ -569,12 +570,12 @@ function VoiceBookingPageInner({
       while (retries < 3) {
         const { text: voiceChoice } = await listen();
         chosenDoctor = parseVoiceDoctorChoice(voiceChoice, doctors);
-        
+
         if (chosenDoctor) break;
 
         retries++;
         if (retries < 3) {
-          await speak("I didn't catch that. Please say the doctor's name or number.");
+          await speak(prompts.doctorRetry);
         }
       }
 
@@ -583,12 +584,12 @@ function VoiceBookingPageInner({
       } else {
         // No valid voice choice — let the user tap the card manually
         dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
-        await speak('Please tap a doctor card to make your selection.');
+        await speak(prompts.doctorTapFallback);
       }
 
     } catch (err) {
       console.error('[VoiceBooking] Doctor fetch error:', err);
-      await speak('I had trouble fetching available doctors. Please try again.');
+      await speak(prompts.doctorFetchError);
       dispatch({ type: 'GO_TO_SYMPTOMS' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -620,7 +621,7 @@ function VoiceBookingPageInner({
     dispatch({ type: 'DATE_STEP_START' });
 
     const safeName = doctor.name.replace(/^Dr\.?\s*/i, '');
-    await speak(`Great choice! Doctor ${safeName}. What date would you like to book? You can say a specific date like 25 June, or say today or tomorrow.`);
+    await speak(prompts.datePrompt(safeName));
 
     await runDateStep(doctor);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -729,7 +730,7 @@ function VoiceBookingPageInner({
     if (chosenDate) {
       await handleDateSelected(doctor, chosenDate);
     } else {
-      await speak('I didn\'t catch that. Please say a date like 25 June, or pick one below.');
+      await speak(prompts.dateRetry);
       await runDateStep(doctor);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -739,9 +740,8 @@ function VoiceBookingPageInner({
     dispatch({ type: 'DATE_SELECTED', date });
     dispatch({ type: 'LOADING_SLOTS', doctorId: doctor.id });
 
-    const d = new Date(date);
-    const friendlyDate = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-    await speak(`Got it, ${friendlyDate}. Let me check available slots.`);
+    const friendlyDate = formatDateSpoken(date, lang);
+    await speak(prompts.dateSelected(friendlyDate));
 
     await runSlotStep(doctor, date);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -774,13 +774,12 @@ function VoiceBookingPageInner({
 
       if (availableSlots.length === 0) {
         if (nextAvailableDate) {
-          await speak(
-            `No slots available for ${formatDateSpoken(dateStr)}. The next available date is ${formatDateSpoken(nextAvailableDate)}. Tap the button to view those slots.`
-          );
+          await speak(prompts.noSlotsNextDate(
+            formatDateSpoken(dateStr, lang),
+            formatDateSpoken(nextAvailableDate, lang),
+          ));
         } else {
-          await speak(
-            `Dr. ${doctor.name} has no available slots in the next 7 days. Please select a different doctor.`
-          );
+          await speak(prompts.noSlots7Days(doctor.name));
         }
         return;
       }
@@ -790,10 +789,10 @@ function VoiceBookingPageInner({
         .slice(0, 3)
         .map(s => {
           const originalIndex = slots.findIndex(slot => slot.id === s.id) + 1;
-          return `Slot ${originalIndex}: ${formatTimeSpoken(s.startTime)}`;
+          return prompts.slotLabel(originalIndex, formatTimeSpoken(s.startTime));
         })
         .join('. ');
-      await speak(`Here are the available slots for ${formatDateSpoken(dateStr)}. ${slotList}. Please tap a slot or say the slot number.`);
+      await speak(prompts.slotList(formatDateSpoken(dateStr, lang), slotList));
 
       // Listen for voice slot selection
       const { text: voiceChoice } = await listen();
@@ -801,19 +800,19 @@ function VoiceBookingPageInner({
 
       if (chosenSlot) {
         if ((chosenSlot as any).isAvailable === false) {
-          await speak('That slot is not available. Please choose a different time slot.');
+          await speak(prompts.slotNotAvailable);
           await runSlotStep(doctor, dateStr);
         } else {
           await handleSlotSelected(chosenSlot, doctor);
         }
       } else {
-        await speak('I didn\'t catch that. Please say the slot number or time.');
+        await speak(prompts.slotRetry);
         await runSlotStep(doctor, dateStr);
       }
 
     } catch (err) {
       console.error('[VoiceBooking] Slot fetch error:', err);
-      await speak('I had trouble fetching available slots. Please try again.');
+      await speak(prompts.slotFetchError);
       dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -854,30 +853,28 @@ function VoiceBookingPageInner({
     // ── Explicit final confirmation before creating the appointment ──────────
     // Read back the chosen doctor + date/slot, then ask a yes/no question using
     // the fast local boolean STT path (listen('boolean')).
-    const readBack =
-      `Just to confirm: an appointment with Dr. ${doctor.name}, ${doctor.specialty}, `
-      + `on ${formatDateSpoken(slot.date)} at ${formatTimeSpoken(slot.startTime)}. `
-      + `Shall I confirm this booking? Say yes or no.`;
+    const readBack = prompts.confirmReadback(
+      doctor.name,
+      doctor.specialty,
+      formatDateSpoken(slot.date, lang),
+      formatTimeSpoken(slot.startTime),
+    );
 
     // Allow a couple of re-asks if the answer is unclear.
     for (let attempt = 0; attempt < 3; attempt++) {
-      await speak(
-        attempt === 0
-          ? readBack
-          : 'Sorry, I didn\'t catch that. Shall I confirm this booking? Please say yes or no.',
-      );
+      await speak(attempt === 0 ? readBack : prompts.confirmRetry);
 
       const { text } = await listen('boolean');
 
       if (isYes(text)) {
-        await speak('Great, confirming your booking now.');
+        await speak(prompts.bookingConfirming);
         await runBookingStep(slot, doctor);
         return;
       }
 
       if (isNo(text)) {
         // Patient declined — return to slot selection so they can pick another time.
-        await speak('No problem. Please choose a different time slot.');
+        await speak(prompts.bookingDeclined);
         dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
         return;
       }
@@ -886,7 +883,7 @@ function VoiceBookingPageInner({
 
     // Exhausted retries — leave the selection on screen for manual confirmation.
     dispatch({ type: 'SET_VOICE_STATE', voiceState: 'idle' });
-    await speak('I\'ll leave your selection on screen. Tap a slot to continue.');
+    await speak(prompts.confirmExhausted);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speak, listen]);
 
@@ -917,7 +914,7 @@ function VoiceBookingPageInner({
         const errData = await res.json().catch(() => ({}));
         if (res.status === 409) {
           // Slot was just booked by someone else — let patient pick again
-          await speak('That slot was just taken. Let me fetch the updated availability.');
+          await speak(prompts.slotTaken);
           dispatch({ type: 'SLOTS_LOADED', slots: [], date: slot.date, nextAvailableDate: null });
           if (state.selectedDoctor) {
             await runSlotStep(state.selectedDoctor, slot.date);
@@ -930,6 +927,9 @@ function VoiceBookingPageInner({
       const result: AppointmentCreationResult = await res.json();
 
       dispatch({ type: 'BOOKING_SUCCESS', result });
+
+      // Announce the confirmation aloud in the patient's language.
+      await speak(prompts.bookingSuccess(result.appointmentId ?? ''));
 
       // Fire-and-forget notification
       fetch('/api/notifications/appointment-confirmation', {
@@ -945,7 +945,7 @@ function VoiceBookingPageInner({
     } catch (err) {
       console.error('[VoiceBooking] Booking error:', err);
       const message = err instanceof Error ? err.message : 'Booking failed. Please try again.';
-      await speak(`I'm sorry, there was an error: ${message}. Please try again or contact reception.`);
+      await speak(prompts.bookingError(message));
       dispatch({ type: 'SET_ERROR', message });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1207,7 +1207,7 @@ function VoiceBookingPageInner({
                           redFlags: [],
                           symptomText: state.symptomText,
                         });
-                        await speak(`Looking for a ${specialty} specialist.`);
+                        await speak(prompts.lookingForSpecialist(specialty));
                         await runDoctorStep(specialty);
                       }}
                       className="text-left px-3 py-2.5 rounded-xl border-2 border-gray-200 bg-white hover:border-blue-400 hover:bg-blue-50 transition-all text-xs font-semibold text-gray-700 hover:text-blue-700 active:scale-[0.97]"
@@ -1410,28 +1410,9 @@ function VoiceBookingPageInner({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Spoken text helpers
+// Spoken text helpers — formatTimeSpoken / formatDateSpoken now live in
+// lib/voice/booking-i18n.ts (locale-aware) and are imported above.
 // ─────────────────────────────────────────────────────────────────────────────
-
-function formatTimeSpoken(time: string): string {
-  const [hourStr, min] = time.split(':');
-  const hour = parseInt(hourStr, 10);
-  const period = hour < 12 ? 'AM' : 'PM';
-  const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
-  return `${h12}:${min} ${period}`;
-}
-
-function formatDateSpoken(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString('en-IN', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'long',
-    });
-  } catch {
-    return iso;
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Page export — wrapped in Suspense (required for useSearchParams in Next.js)

@@ -47,10 +47,14 @@ function checkRateLimit(orgId: string): boolean {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { symptomText, organisationId } = body as {
+    const { symptomText, organisationId, language } = body as {
       symptomText?: string;
       organisationId?: string;
+      language?: 'en' | 'hi';
     };
+
+    // Default to English when omitted (keeps the existing English-only flow working).
+    const lang: 'en' | 'hi' = language === 'hi' ? 'hi' : 'en';
 
     // ── 400: Required fields ─────────────────────────────────────────────────
     if (!symptomText?.trim()) {
@@ -93,7 +97,7 @@ export async function POST(request: NextRequest) {
     }
 
     // ── NLU analysis ─────────────────────────────────────────────────────────
-    const result = await analyseSymptoms(symptomText.trim());
+    const result = await analyseSymptoms(symptomText.trim(), lang);
 
     return NextResponse.json({
       success: true,

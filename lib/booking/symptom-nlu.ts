@@ -15,7 +15,7 @@
  */
 
 import OpenAI from 'openai';
-import type { SymptomNLUResponse } from '@/lib/contracts/voice';
+import type { SymptomNLUResponse, LanguageCode } from '@/lib/contracts/voice';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Specialty reference map (symptom guardrail — FR-3.5)
@@ -110,10 +110,17 @@ async function callGroq(systemPrompt: string, userPrompt: string): Promise<strin
 // Strict guardrail: LLM can ONLY choose from VALID_SPECIALTIES.
 // No clinical diagnosis — routing only.
 // ─────────────────────────────────────────────────────────────────────────────
-function buildSystemPrompt(): string {
+function buildSystemPrompt(language: LanguageCode = 'en'): string {
   const referenceLines = Object.entries(SPECIALTY_REFERENCE)
     .map(([specialty, keywords]) => `  ${specialty}: ${keywords.join(', ')}`)
     .join('\n');
+
+  // The patient may describe symptoms in Hindi (or code-switched Hindi/English).
+  // The LLM already understands both; we only need the spoken "reasoning" field
+  // to come back in the patient's language so the assistant can voice it.
+  const reasoningLanguageRule = language === 'hi'
+    ? '8. Write the "reasoning" field in HINDI (Devanagari script), suitable to be spoken to the patient. Keep specialty names in English. All other fields stay as specified.'
+    : '8. Write the "reasoning" field in ENGLISH, suitable to be spoken to the patient.';
 
   return `You are an AI medical triage assistant that maps patient-described symptoms to hospital specialties.
 
@@ -121,11 +128,12 @@ IMPORTANT RULES:
 1. You NEVER diagnose. You only route to specialties.
 2. You MUST only use specialties from this exact list:
    ${VALID_SPECIALTIES.join(', ')}
-3. Use the symptom-to-specialty reference below to guide your routing. Match informal or colloquial descriptions (e.g. "leg is paining", "soreness") to the closest keywords.
+3. Use the symptom-to-specialty reference below to guide your routing. Match informal or colloquial descriptions (e.g. "leg is paining", "soreness", or the Hindi equivalents like "पैर में दर्द") to the closest keywords.
 4. If symptoms match multiple specialties, list all relevant ones (primary first).
 5. Always assess for emergencies first.
 6. Return ONLY valid JSON — no markdown, no code blocks, no extra text.
 7. Set confidence >= 0.6 whenever the symptoms reasonably match at least one specialty, even if the phrasing is informal.
+${reasoningLanguageRule}
 
 SYMPTOM REFERENCE (use these to guide routing):
 ${referenceLines}
@@ -155,7 +163,13 @@ If emergency detected, set isEmergency: true and describe the emergency in redFl
  *   UI can ask the patient to clarify or choose a department manually.
  *   We do NOT silently auto-route to General Medicine.
  */
-export async function analyseSymptoms(symptomText: string): Promise<SymptomNLUResponse> {
+export async function analyseSymptoms(
+  symptomText: string,
+  language: LanguageCode = 'en',
+): Promise<SymptomNLUResponse> {
+  // Localised fallback reasoning strings (used when the LLM path can't supply one).
+  const fb = NLU_FALLBACK_REASONING[language] || NLU_FALLBACK_REASONING.en;
+
   // ─── Step 1: Fast local red-flag scan ──────────────────────────────────────
   const localRedFlags = detectRedFlagsLocally(symptomText);
   if (localRedFlags.length > 0) {
@@ -165,13 +179,13 @@ export async function analyseSymptoms(symptomText: string): Promise<SymptomNLURe
       redFlags: localRedFlags,
       isEmergency: true,
       confidence: 1.0,
-      reasoning: 'Symptoms suggest a medical emergency requiring immediate care.',
+      reasoning: fb.emergency,
     };
   }
 
   // ─── Step 2: LLM analysis ──────────────────────────────────────────────────
   try {
-    const raw = await callGroq(buildSystemPrompt(), `Patient symptoms: "${symptomText}"`);
+    const raw = await callGroq(buildSystemPrompt(language), `Patient symptoms: "${symptomText}"`);
 
     // Strip any accidental markdown wrapping
     const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -202,7 +216,7 @@ export async function analyseSymptoms(symptomText: string): Promise<SymptomNLURe
         redFlags: validatedRedFlags,
         isEmergency,
         confidence: 0,
-        reasoning: parsed.reasoning || 'I could not determine the right department. Let me ask you a few more questions.',
+        reasoning: parsed.reasoning || fb.undetermined,
       };
     }
 
@@ -211,7 +225,7 @@ export async function analyseSymptoms(symptomText: string): Promise<SymptomNLURe
       redFlags: validatedRedFlags,
       isEmergency,
       confidence,
-      reasoning: parsed.reasoning || `Your symptoms suggest ${validatedSpecialties[0]}.`,
+      reasoning: parsed.reasoning || fb.suggests(validatedSpecialties[0]),
     };
   } catch (error) {
     console.error('[SymptomNLU] LLM call failed:', error);
@@ -221,10 +235,36 @@ export async function analyseSymptoms(symptomText: string): Promise<SymptomNLURe
       redFlags: [],
       isEmergency: false,
       confidence: 0,
-      reasoning: 'I had trouble understanding your symptoms. Could you describe them in a bit more detail?',
+      reasoning: fb.trouble,
     };
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Localised fallback reasoning strings
+// Used only when the LLM does not return a reasoning string (or the call fails).
+// When the LLM path succeeds, its reasoning is already in the patient's language
+// because buildSystemPrompt() instructs it to write in that language.
+// ─────────────────────────────────────────────────────────────────────────────
+const NLU_FALLBACK_REASONING: Record<LanguageCode, {
+  emergency: string;
+  undetermined: string;
+  trouble: string;
+  suggests: (specialty: string) => string;
+}> = {
+  en: {
+    emergency: 'Symptoms suggest a medical emergency requiring immediate care.',
+    undetermined: 'I could not determine the right department. Let me ask you a few more questions.',
+    trouble: 'I had trouble understanding your symptoms. Could you describe them in a bit more detail?',
+    suggests: (specialty) => `Your symptoms suggest ${specialty}.`,
+  },
+  hi: {
+    emergency: 'लक्षण एक चिकित्सा आपातकाल का संकेत देते हैं जिसमें तुरंत देखभाल आवश्यक है।',
+    undetermined: 'मैं सही विभाग तय नहीं कर पाई। मुझे आपसे कुछ और सवाल पूछने दीजिए।',
+    trouble: 'आपके लक्षण समझने में मुझे दिक्कत हुई। क्या आप उन्हें थोड़ा और विस्तार से बता सकते हैं?',
+    suggests: (specialty) => `आपके लक्षण ${specialty} की ओर इशारा करते हैं।`,
+  },
+};
 
 /** Returns the full list of valid specialty names (for UI department picker fallback) */
 export function getValidSpecialties(): string[] {
