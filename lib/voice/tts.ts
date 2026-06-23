@@ -1,239 +1,452 @@
 // lib/voice/tts.ts — [A] Text-to-Speech implementation
-// Uses browser Web SpeechSynthesis as the v1 fallback.
-// Production: swap to Coqui/XTTS without changing VoiceSession interface.
+// Phase 3B+: WebSocket streaming TTS with native event-driven resolution.
+//
+// Overview
+// ────────
+// speakText() opens a WebSocket to /api/ws/tts, sends one JSON frame, and
+// receives N binary frames (one WAV per sentence). Each chunk is decoded with
+// decodeAudioData() and scheduled on the AudioContext clock for gapless
+// playback.
+//
+// Resolution Strategy (event-driven, not math-based)
+// ───────────────────────────────────────────────────
+// The speakText() promise resolves ONLY when the very last AudioBufferSourceNode
+// fires its native `onended` event — i.e., when audio physically stops coming
+// out of the speakers. No setTimeout, no nextPlayTime arithmetic.
+//
+// Race condition handling:
+//   • The server sends all binary frames and "done" within ~10 ms.
+//   • decodeAudioData() is async and may not have resolved when "done" fires.
+//   • We use two counters:
+//       totalChunksExpected — snapshot of chunksReceived when "done" arrives.
+//       chunksEnded         — incremented in every node's onended.
+//   • When chunksEnded === totalChunksExpected (> 0), we resolve.
+//   • Because the counters are compared in BOTH the "done" handler AND each
+//     onended, whichever finishes last wins — no timing assumption needed.
+//
+// Barge-in protection:
+//   • stopSpeaking() increments a module-level `sessionId` counter BEFORE
+//     calling node.stop(). Every onended closure captures the session ID at
+//     the time the node is created. If the captured ID no longer matches the
+//     current module-level ID, the onended callback is a no-op.
+//   • This is automatically correct across nested/overlapping speakText calls.
+//
+// Fallback chain (unchanged from v1):
+//   Sarvam WAV via WS → Google MP3 via WS → browser SpeechSynthesis
 
 import type { LanguageCode } from '@/lib/contracts/voice';
 import { TTS_LANG_MAP } from './i18n';
 
-// Check if TTS is available
+// ─── AudioContext singleton ───────────────────────────────────────────────────
+
+let audioCtx: AudioContext | null = null;
+
+// ─── Active-session state ─────────────────────────────────────────────────────
+
+/** The open WebSocket for the current TTS session. Closed by stopSpeaking(). */
+let activeSocket: WebSocket | null = null;
+
+/** All AudioBufferSourceNodes scheduled for the current session.
+ *  Stored so stopSpeaking() can call .stop() on all of them. */
+let activeSourceNodes: AudioBufferSourceNode[] = [];
+
+/** AudioContext clock: next available start time for sequential scheduling. */
+let nextPlayTime = 0;
+
+/**
+ * Monotonically increasing session counter.
+ * Incremented by stopSpeaking() so that onended closures from a stopped
+ * session can detect they are stale and avoid resolving the new session.
+ */
+let sessionId = 0;
+
+// ─── Auto-stop on page leave / navigation ────────────────────────────────────
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => { stopSpeaking(); });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { stopSpeaking(); }
+  });
+
+  // Next.js client-side navigation (popstate / router.push)
+  window.addEventListener('popstate', () => { stopSpeaking(); });
+}
+
+// ─── iOS / autoplay unlock ────────────────────────────────────────────────────
+
+export function unlockAudio() {
+  if (typeof window === 'undefined') return;
+
+  if (!audioCtx) {
+    const AudioContextClass =
+      window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioContextClass) {
+      audioCtx = new AudioContextClass();
+    }
+  }
+
+  // Resume the context on a user-gesture tick so iOS lifts its autoplay block
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
+}
+
+// ─── isTTSSupported ───────────────────────────────────────────────────────────
+
 export function isTTSSupported(): boolean {
   if (typeof window === 'undefined') return false;
   return !!window.speechSynthesis;
 }
 
-// Global AudioContext for Web Audio API playback
-let audioCtx: AudioContext | null = null;
+// ─── stopSpeaking ─────────────────────────────────────────────────────────────
 
-// ─── Auto-stop speech on page leave / reload ─────────────────────────────────
-if (typeof window !== 'undefined') {
-  // Fires on reload, tab close, navigating away
-  window.addEventListener('beforeunload', () => {
-    stopSpeaking();
-  });
+export function stopSpeaking(): void {
+  // 1. Invalidate the current session BEFORE stopping nodes.
+  //    Any onended closure that fires after this point will see a stale
+  //    sessionId and silently skip its safeResolve() call.
+  sessionId++;
 
-  // Fires when user switches tabs or minimizes
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      stopSpeaking();
-    }
-  });
+  // 2. Kill the open WebSocket so the server stops sending chunks
+  if (activeSocket) {
+    try { activeSocket.close(); } catch { /* ignore */ }
+    activeSocket = null;
+  }
 
-  // Next.js client-side navigation fires popstate
-  window.addEventListener('popstate', () => {
-    stopSpeaking();
-  });
-}
+  // 3. Stop all scheduled AudioBufferSourceNodes.
+  //    The Web Audio API fires onended synchronously or on the next event loop
+  //    tick after .stop(). The sessionId bump above ensures those callbacks
+  //    are no-ops.
+  for (const node of activeSourceNodes) {
+    try { node.stop(); } catch { /* already stopped — safe to ignore */ }
+  }
+  activeSourceNodes = [];
+  nextPlayTime = 0;
 
-export function unlockAudio() {
-  if (typeof window !== 'undefined') {
-    if (!audioCtx) {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (AudioContextClass) {
-        audioCtx = new AudioContextClass();
-      }
-    }
-    // Resume context on user gesture to unlock it permanently
-    if (audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
-    }
+  // 4. Stop browser SpeechSynthesis fallback (if it was used)
+  if (isTTSSupported()) {
+    window.speechSynthesis.cancel();
+  }
+
+  // 5. Stop legacy HTMLAudioElement (Google TTS path, kept for compatibility)
+  if (typeof window !== 'undefined' && (window as any)._currentAudio) {
+    const audio = (window as any)._currentAudio as HTMLAudioElement;
+    audio.pause();
+    audio.currentTime = 0;
+    (window as any)._currentAudio = null;
   }
 }
 
-/**
- * Helper to decode base64 into an ArrayBuffer
- */
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binaryString = window.atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-let currentAbortController: AbortController | null = null;
+// ─── speakText ────────────────────────────────────────────────────────────────
 
 /**
- * Speak text using the browser's SpeechSynthesis API.
- * Returns a promise that resolves when speech is complete.
+ * Synthesise and play `text` in `language` using the Phase 3B WS pipeline.
+ *
+ * Resolves when the very last AudioBufferSourceNode fires its native `onended`
+ * event — i.e., when audio physically stops coming out of the speakers.
  */
 export async function speakText(
   text: string,
   language: LanguageCode,
 ): Promise<void> {
-  // First, stop any ongoing audio (browser TTS or HTML5 audio)
+  // Stop any previous playback (also bumps sessionId)
   stopSpeaking();
 
-  return new Promise(async (resolve) => {
-    try {
-      currentAbortController = new AbortController();
-      
-      // Try Sarvam AI TTS first
-      const res = await fetch('/api/public/voice/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, languageCode: language }),
-        signal: currentAbortController.signal
-      });
+  // Ensure AudioContext is alive and resumed (iOS unlock)
+  if (!audioCtx) { unlockAudio(); }
+  if (!audioCtx) {
+    // AudioContext unavailable → fall through to browser TTS
+    return new Promise((resolve) => fallbackSpeak(text, language, resolve));
+  }
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.audios && data.audios.length > 0) {
-          
-          const isGoogleTTS = data.provider === 'google-tts';
+  // Seed nextPlayTime slightly ahead of now so the first chunk starts
+  // immediately rather than mid-decode.
+  nextPlayTime = audioCtx.currentTime + 0.1;
 
-          // ── Google TTS returns MP3 → use HTMLAudioElement (handles MP3 natively)
-          if (isGoogleTTS) {
-            try {
-              const playChunksViaAudio = (chunks: string[], index: number): Promise<void> => {
-                return new Promise((done) => {
-                  if (index >= chunks.length || currentAbortController?.signal.aborted) {
-                    done();
-                    return;
-                  }
+  // Capture the session ID for this call. Every closure below that touches
+  // safeResolve captures this value and guards against stale invocations.
+  const mySessionId = sessionId;
 
-                  const audio = new Audio(`data:audio/mpeg;base64,${chunks[index]}`);
-                  (window as any)._currentAudio = audio;
-                  audio.onended = () => {
-                    (window as any)._currentAudio = null;
-                    playChunksViaAudio(chunks, index + 1).then(done);
-                  };
-                  audio.onerror = (e) => {
-                    console.warn('[TTS] Audio element playback error:', e);
-                    (window as any)._currentAudio = null;
-                    done(); // Skip this chunk
-                  };
-                  audio.play().catch((e) => {
-                    console.warn('[TTS] Audio.play() rejected:', e);
-                    done();
-                  });
-                });
-              };
+  return new Promise<void>((resolve) => {
+    const wsScheme =
+      typeof window !== 'undefined' && window.location.protocol === 'https:'
+        ? 'wss'
+        : 'ws';
+    const wsUrl = `${wsScheme}://${window.location.host}/api/ws/tts`;
 
-              console.log(`[TTS] Playing ${data.audios.length} chunk(s) via Audio element (Google TTS)`);
-              await playChunksViaAudio(data.audios, 0);
-              resolve();
-              return;
-            } catch (playErr) {
-              console.warn('[TTS] Google TTS Audio element failed:', playErr);
-              fallbackSpeak(text, language, resolve);
-              return;
-            }
-          }
+    const socket = new WebSocket(wsUrl);
+    activeSocket = socket;
 
-          // ── Sarvam returns WAV → use Web Audio API (decodeAudioData)
-          if (!audioCtx) unlockAudio();
-          
-          if (audioCtx) {
-            if (audioCtx.state === 'suspended') {
-              await audioCtx.resume();
-            }
+    // ── Session counters ───────────────────────────────────────────────────
+    /** Number of binary frames received from the server. */
+    let chunksReceived = 0;
 
-            try {
-              // Play array of base64 audio chunks sequentially
-              const playNext = (index: number): Promise<void> => {
-                return new Promise((done) => {
-                  if (index >= data.audios.length || currentAbortController?.signal.aborted) {
-                    done();
-                    return;
-                  }
+    /**
+     * Snapshot of chunksReceived at the moment "done" arrives.
+     * -1 means "done" hasn't arrived yet.
+     */
+    let totalChunksExpected = -1;
 
-                  const arrayBuffer = base64ToArrayBuffer(data.audios[index]);
-                  audioCtx!.decodeAudioData(arrayBuffer).then((audioBuffer) => {
-                    const source = audioCtx!.createBufferSource();
-                    source.buffer = audioBuffer;
-                    source.connect(audioCtx!.destination);
-                    
-                    (window as any)._currentAudioSource = source;
-                    
-                    source.onended = () => {
-                      (window as any)._currentAudioSource = null;
-                      playNext(index + 1).then(done);
-                    };
-                    
-                    source.start(0);
-                  }).catch((decodeErr) => {
-                    console.warn('[TTS] decodeAudioData failed:', decodeErr);
-                    done();
-                  });
-                });
-              };
+    /**
+     * Number of AudioBufferSourceNodes whose onended has fired naturally
+     * (i.e., audio finished playing to the DAC, not stopped by barge-in).
+     * When this equals totalChunksExpected the promise resolves.
+     */
+    let chunksEnded = 0;
 
-              await playNext(0);
-              resolve();
-              return; // Success!
+    let resolved = false;
 
-            } catch (playErr) {
-              console.warn('[TTS] Web Audio API playback failed:', playErr);
-              fallbackSpeak(text, language, resolve);
-              return;
-            }
-          }
+    // Guard: only resolve once, and only if this session is still active.
+    const safeResolve = () => {
+      if (resolved || sessionId !== mySessionId) return;
+      resolved = true;
+      resolve();
+    };
+
+    // ── Core resolution logic ─────────────────────────────────────────────
+    //
+    // Called from two places: each node's onended AND the "done" handler.
+    // Whichever executes last (i.e., whichever of the async decode pipeline
+    // or the server "done" message is slowest) will find both conditions
+    // satisfied and trigger the resolve.
+    const checkDone = () => {
+      if (
+        totalChunksExpected >= 0 &&          // "done" has arrived
+        chunksEnded === totalChunksExpected   // every node has finished
+      ) {
+        if (totalChunksExpected === 0) {
+          // Edge: "done" with zero chunks — shouldn't happen (fallback handles
+          // this earlier), but guard anyway.
+          safeResolve();
+        } else {
+          console.log(
+            `[TTS] All ${totalChunksExpected} chunk(s) played to completion — resolving`,
+          );
+          safeResolve();
         }
-      } else {
-        const errText = await res.text();
-        console.warn(`[TTS] API returned error ${res.status}:`, errText);
       }
-      
-      // Fallback if API returned error or no audio
-      fallbackSpeak(text, language, resolve);
-      
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
-        console.log('[TTS] Fetch aborted');
-        resolve();
-        return;
+    };
+
+    // ── scheduleChunk ─────────────────────────────────────────────────────
+
+    /**
+     * Decode a WAV/MP3 ArrayBuffer and schedule it on the AudioContext clock.
+     *
+     * The node's onended callback:
+     *   1. Checks the session ID — if this session was interrupted, it is a
+     *      no-op. The new session's safeResolve is untouched.
+     *   2. Increments chunksEnded and calls checkDone().
+     */
+    const scheduleChunk = (arrayBuffer: ArrayBuffer): Promise<void> => {
+      if (!audioCtx) return Promise.resolve();
+
+      return audioCtx.decodeAudioData(arrayBuffer).then((audioBuffer) => {
+        if (!audioCtx) return;
+        // Bail if this session was already interrupted while we were decoding.
+        if (sessionId !== mySessionId) return;
+
+        const safeStart = Math.max(nextPlayTime, audioCtx.currentTime + 0.01);
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioCtx.destination);
+
+        activeSourceNodes.push(source);
+
+        source.onended = () => {
+          // Remove from tracking list regardless of interruption
+          activeSourceNodes = activeSourceNodes.filter((n) => n !== source);
+
+          // Barge-in protection: if sessionId has advanced, this node was
+          // stopped by stopSpeaking() — do NOT resolve the (now-gone) promise.
+          if (sessionId !== mySessionId) return;
+
+          chunksEnded++;
+          console.log(
+            `[TTS] Node ended — ${chunksEnded}/${totalChunksExpected === -1 ? '?' : totalChunksExpected} complete`,
+          );
+          checkDone();
+        };
+
+        source.start(safeStart);
+        nextPlayTime = safeStart + audioBuffer.duration;
+
+        console.log(
+          `[TTS] Chunk scheduled at ${safeStart.toFixed(3)}s, ` +
+          `duration=${audioBuffer.duration.toFixed(3)}s, ` +
+          `nextPlay=${nextPlayTime.toFixed(3)}s`,
+        );
+      }).catch((err) => {
+        console.warn('[TTS] decodeAudioData failed for chunk:', err);
+        // A failed decode means this chunk will never produce an onended
+        // event. Treat it as if it "ended" so we don't hang.
+        if (sessionId !== mySessionId) return;
+        chunksEnded++;
+        checkDone();
+      });
+    };
+
+    // ── Socket event handlers ──────────────────────────────────────────────
+
+    socket.onopen = () => {
+      console.log('[TTS] WS open — sending speak request');
+      socket.send(JSON.stringify({ type: 'speak', text, language }));
+    };
+
+    socket.onmessage = (event) => {
+      if (sessionId !== mySessionId) return; // session interrupted
+
+      if (event.data instanceof Blob) {
+        // Binary frame = WAV/MP3 audio for one sentence.
+        chunksReceived++;
+        event.data
+          .arrayBuffer()
+          .then((ab) => scheduleChunk(ab))
+          .catch((err) => {
+            console.warn('[TTS] Blob decode failed:', err);
+            // Count as ended so checkDone() can still fire.
+            if (sessionId !== mySessionId) return;
+            chunksEnded++;
+            checkDone();
+          });
+
+      } else if (event.data instanceof ArrayBuffer) {
+        // Some environments deliver binary directly as ArrayBuffer.
+        chunksReceived++;
+        scheduleChunk(event.data).catch((err) => {
+          console.warn('[TTS] ArrayBuffer decode failed:', err);
+          if (sessionId !== mySessionId) return;
+          chunksEnded++;
+          checkDone();
+        });
+
+      } else if (typeof event.data === 'string') {
+        // JSON control frame
+        try {
+          const msg = JSON.parse(event.data) as { type: string; message?: string };
+
+          if (msg.type === 'done') {
+            console.log(`[TTS] Server done — ${chunksReceived} chunk(s) received`);
+            socket.close();
+
+            if (chunksReceived === 0) {
+              // No audio at all → fall back to browser TTS
+              console.warn('[TTS] No audio chunks received — using browser fallback');
+              fallbackSpeak(text, language, safeResolve);
+              return;
+            }
+
+            // Freeze the expected count. checkDone() will now resolve as
+            // soon as every node's onended has fired. If all onended callbacks
+            // already fired before "done" arrived (unlikely but possible for
+            // very short audio), checkDone() resolves immediately here.
+            totalChunksExpected = chunksReceived;
+            console.log(
+              `[TTS] Expecting ${totalChunksExpected} onended event(s) ` +
+              `(${chunksEnded} already fired)`,
+            );
+            checkDone();
+
+          } else if (msg.type === 'error') {
+            console.error('[TTS] Server error:', msg.message);
+            socket.close();
+            if (chunksReceived === 0) {
+              fallbackSpeak(text, language, safeResolve);
+            } else {
+              // Partial audio already scheduled — wait for whatever ended
+              totalChunksExpected = chunksReceived;
+              checkDone();
+            }
+          }
+        } catch {
+          console.warn('[TTS] Malformed JSON from server:', event.data);
+        }
       }
-      console.warn('[TTS] API or playback failed, using fallback:', err);
-      fallbackSpeak(text, language, resolve);
-    }
+    };
+
+    socket.onerror = (err) => {
+      console.warn('[TTS] WebSocket error:', err);
+      // onclose fires immediately after onerror — handled there
+    };
+
+    socket.onclose = (evt) => {
+      activeSocket = null;
+      console.log(`[TTS] Socket closed (code=${evt.code})`);
+
+      if (resolved || sessionId !== mySessionId) return;
+
+      if (chunksReceived === 0) {
+        // Connection dropped before we received any audio
+        console.warn('[TTS] Socket closed with no audio — using browser fallback');
+        fallbackSpeak(text, language, safeResolve);
+      } else if (totalChunksExpected === -1) {
+        // Closed before "done" arrived — treat received chunks as total
+        totalChunksExpected = chunksReceived;
+        checkDone();
+      }
+      // If totalChunksExpected was already set, onended callbacks will resolve
+    };
+
+    // Safety net: if audio hangs for any reason (device sleep, context
+    // suspend, browser bug), force-resolve after a generous ceiling.
+    // 30 s covers even the longest realistic TTS response.
+    // safeResolve's `resolved` guard makes this idempotent.
+    const safetyTimeout = setTimeout(() => {
+      if (!resolved && sessionId === mySessionId) {
+        console.warn('[TTS] Safety timeout fired — force-resolving');
+        safeResolve();
+      }
+    }, 30_000);
+
+    // Clear the safety timeout when the socket closes (normal path) or when
+    // the promise resolves via the fallback path before the socket closes.
+    // Because safeResolve is idempotent, a late safetyTimeout fire is harmless,
+    // but clearing it avoids unnecessary work.
+    socket.addEventListener('close', () => clearTimeout(safetyTimeout), { once: true });
   });
 }
+
+// ─── Browser SpeechSynthesis fallback ────────────────────────────────────────
+// Preserved verbatim from the v1 implementation.
 
 function findBestVoice(language: LanguageCode): SpeechSynthesisVoice | null {
   const voices = window.speechSynthesis.getVoices();
   const langCode = TTS_LANG_MAP[language] || 'en-IN';
   const targetLangPrefix = langCode.split('-')[0];
 
-  // Try to find a female voice for the target language
-  const femaleVoice = voices.find(v => 
-    v.lang.startsWith(targetLangPrefix) && 
-    (v.name.toLowerCase().includes('female') || 
-     v.name.toLowerCase().includes('girl') || 
-     v.name.toLowerCase().includes('woman') || 
-     v.name.toLowerCase().includes('zira') || 
-     v.name.toLowerCase().includes('lekha') || 
-     v.name.toLowerCase().includes('aditi'))
+  const femaleVoice = voices.find(
+    (v) =>
+      v.lang.startsWith(targetLangPrefix) &&
+      (v.name.toLowerCase().includes('female') ||
+        v.name.toLowerCase().includes('girl') ||
+        v.name.toLowerCase().includes('woman') ||
+        v.name.toLowerCase().includes('zira') ||
+        v.name.toLowerCase().includes('lekha') ||
+        v.name.toLowerCase().includes('aditi')),
   );
   if (femaleVoice) return femaleVoice;
 
-  // Fallback to any voice for that language
   const langVoice = voices.find(
-    v => v.lang === langCode || v.lang.startsWith(targetLangPrefix)
+    (v) => v.lang === langCode || v.lang.startsWith(targetLangPrefix),
   );
   if (langVoice) return langVoice;
 
-  // For Hindi: also try 'hi' prefix since some browsers use 'hi' not 'hi-IN'
   if (language === 'hi') {
-    const hiVoice = voices.find(v => v.lang.startsWith('hi'));
+    const hiVoice = voices.find((v) => v.lang.startsWith('hi'));
     if (hiVoice) return hiVoice;
   }
 
   return null;
 }
 
-function fallbackSpeak(text: string, language: LanguageCode, resolve: () => void) {
+function fallbackSpeak(
+  text: string,
+  language: LanguageCode,
+  resolve: () => void,
+) {
   if (!isTTSSupported()) {
     console.warn('[TTS] SpeechSynthesis not supported, text:', text);
     resolve();
@@ -242,10 +455,14 @@ function fallbackSpeak(text: string, language: LanguageCode, resolve: () => void
 
   const langCode = TTS_LANG_MAP[language] || 'en-IN';
   let resolved = false;
-  const safeResolve = () => { if (!resolved) { resolved = true; resolve(); } };
+  const safeResolve = () => {
+    if (!resolved) {
+      resolved = true;
+      resolve();
+    }
+  };
 
   const doSpeak = () => {
-    // Stop any queued speech first
     window.speechSynthesis.cancel();
 
     const MAX_CHUNK = 200;
@@ -281,12 +498,10 @@ function fallbackSpeak(text: string, language: LanguageCode, resolve: () => void
     setTimeout(safeResolve, Math.max(text.length * 80, 5000));
   };
 
-  // Voices might not be loaded yet — wait for them
   const voices = window.speechSynthesis.getVoices();
   if (voices.length > 0) {
     doSpeak();
   } else {
-    // Some browsers load voices async — wait up to 1s
     const handler = () => {
       window.speechSynthesis.onvoiceschanged = null;
       doSpeak();
@@ -322,41 +537,10 @@ async function speakChunks(chunks: string[], language: LanguageCode): Promise<vo
   }
 }
 
-/**
- * Stop any ongoing speech.
- */
-export function stopSpeaking(): void {
-  if (currentAbortController) {
-    currentAbortController.abort();
-    currentAbortController = null;
-  }
-
-  if (isTTSSupported()) {
-    window.speechSynthesis.cancel();
-  }
-  
-  if (typeof window !== 'undefined') {
-    if ((window as any)._currentAudio) {
-      const audio = (window as any)._currentAudio as HTMLAudioElement;
-      audio.pause();
-      audio.currentTime = 0;
-      (window as any)._currentAudio = null;
-    }
-    
-    if ((window as any)._currentAudioSource) {
-      try {
-        const source = (window as any)._currentAudioSource as AudioBufferSourceNode;
-        source.stop();
-      } catch (e) {
-        // Ignore errors if already stopped
-      }
-      (window as any)._currentAudioSource = null;
-    }
-  }
-}
+// ─── preloadVoices (unchanged from v1) ───────────────────────────────────────
 
 /**
- * Preload voices — some browsers load voices asynchronously.
+ * Preload browser voices — some browsers load voices asynchronously.
  */
 export function preloadVoices(): Promise<SpeechSynthesisVoice[]> {
   return new Promise((resolve) => {
@@ -364,7 +548,7 @@ export function preloadVoices(): Promise<SpeechSynthesisVoice[]> {
       resolve([]);
       return;
     }
-    
+
     const voices = window.speechSynthesis.getVoices();
     if (voices.length > 0) {
       resolve(voices);
@@ -375,7 +559,6 @@ export function preloadVoices(): Promise<SpeechSynthesisVoice[]> {
       resolve(window.speechSynthesis.getVoices());
     };
 
-    // Fallback timeout
     setTimeout(() => resolve(window.speechSynthesis.getVoices()), 2000);
   });
 }

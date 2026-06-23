@@ -11,7 +11,7 @@ async function transcribeWithSarvam(fileBuffer: Buffer, fileName: string, mimeTy
   const isEnglish = languageCode === 'en-IN';
 
   // Create a fresh File from the buffer so Sarvam gets its own copy
-  const file = new File([fileBuffer], fileName, { type: mimeType });
+  const file = new File([new Uint8Array(fileBuffer)], fileName, { type: mimeType });
 
   const response = await client.speechToText.transcribe({
     file,
@@ -39,7 +39,7 @@ async function transcribeWithGroqWhisper(fileBuffer: Buffer, fileName: string, m
   const whisperLang = languageCode === 'hi-IN' ? 'hi' : 'en';
 
   // Create a fresh File from the buffer so Groq gets its own copy
-  const file = new File([fileBuffer], fileName, { type: mimeType });
+  const file = new File([new Uint8Array(fileBuffer)], fileName, { type: mimeType });
 
   const response = await groq.audio.transcriptions.create({
     file,
