@@ -54,11 +54,11 @@ export const FIELD_ORDER: FieldSpec[] = [
   },
   {
     name: 'email',
-    required: false,
+    required: true,
     type: 'email',
     voiceHostile: true,
-    skippable: true,
-    maxRetries: 2,
+    skippable: false,
+    maxRetries: 3,
   },
   {
     name: 'date_of_birth',
@@ -173,8 +173,9 @@ export function validateField(
     }
 
     case 'email': {
-      if (!trimmed || trimmed.toLowerCase() === 'skip') return { valid: true, cleaned: '' };
-      
+      // Email is required — empty input (or a "skip" intent) is not accepted.
+      if (!trimmed || trimmed.toLowerCase() === 'skip') return { valid: false, cleaned: '', error: 'Email is required' };
+
       let cleanedEmail = trimmed.toLowerCase();
       // Replace spoken symbols with characters
       cleanedEmail = cleanedEmail.replace(/\s+at\s+the\s+rate\s+/g, '@');
