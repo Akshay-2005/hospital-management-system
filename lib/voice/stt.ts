@@ -472,8 +472,15 @@ export async function listenOnce(
 
     /**
      * Legacy ScriptProcessorNode shim for browsers that don't support AudioWorklet
-     * (Safari < 14.5, some older Android WebViews).
-     * Runs on the main thread — acceptable for a fallback path.
+     * (Safari < 14.5, some older Android WebViews) or when addModule() fails
+     * (e.g. the Chromium worklet AbortError).
+     *
+     * Self-contained VAD: volume is measured natively inside onaudioprocess
+     * (RMS of the raw frame) rather than via the global RAF/analyser loop, which
+     * throttles in background tabs and raced with this node. Capture is routed
+     * through a zero-gain node so the processor keeps running WITHOUT feeding the
+     * mic back to the speakers (the feedback loop that kept volume artificially
+     * high so silence was never detected).
      * @deprecated Remove once Safari < 14.5 share drops below 1%.
      */
     const startScriptProcessorFallback = () => {
@@ -485,9 +492,48 @@ export async function listenOnce(
       const targetSampleRate = 16_000;
       const ratio = inputSampleRate / targetSampleRate;
 
+      // RMS amplitude (time-domain, 0..1) above which a frame counts as speech.
+      // ~-40 dBFS — low enough for quiet speakers, high enough to ignore room noise.
+      const SPEECH_RMS_THRESHOLD = 0.01;
+
+      // A ScriptProcessorNode only runs while connected to a destination, but we
+      // must NOT route the mic to the speakers (acoustic feedback keeps the
+      // measured volume high → silence is never detected). Routing through a
+      // muted gain node keeps the node "pulled" while emitting pure silence.
+      const mutedGain = audioContext.createGain();
+      mutedGain.gain.value = 0;
+
+      const teardownProcessor = () => {
+        try { processor.onaudioprocess = null; } catch (_) {}
+        try { source.disconnect(processor); } catch (_) {}
+        try { processor.disconnect(); } catch (_) {}
+        try { mutedGain.disconnect(); } catch (_) {}
+      };
+      // Let signalEndOfSpeech() (VAD silence OR hard timeout) tear the capture
+      // graph down immediately, so PCM stops streaming the moment speech ends.
+      stopFallbackRecorder = teardownProcessor;
+
       processor.onaudioprocess = (evt) => {
         if (resolved) return;
         const channelData = evt.inputBuffer.getChannelData(0);
+
+        // ── Native VAD: measure this frame's RMS directly from the audio
+        //    callback (reliable even when the tab is backgrounded). ──────────
+        let sumSquares = 0;
+        for (let i = 0; i < channelData.length; i++) {
+          sumSquares += channelData[i] * channelData[i];
+        }
+        const rms = Math.sqrt(sumSquares / channelData.length);
+        if (rms > SPEECH_RMS_THRESHOLD) {
+          if (!isSpeaking) {
+            console.log('[STT-WS] Speech detected (ScriptProcessor RMS:', rms.toFixed(3), ')');
+            isSpeaking = true;
+          }
+          // 1.2 s post-speech silence window (matches the AudioWorklet path).
+          resetSilenceTimer(1_200);
+        }
+
+        // ── Downsample to 16 kHz Int16 PCM and stream to the server. ────────
         const outputLength = Math.floor(channelData.length / ratio);
         const pcm16 = new Int16Array(outputLength);
         for (let i = 0; i < outputLength; i++) {
@@ -504,24 +550,29 @@ export async function listenOnce(
         }
       };
 
+      // Connect through the muted gain (no feedback) so the processor stays pulled.
       source.connect(processor);
-      processor.connect(audioContext.destination); // Must be connected to run
-      console.log('[STT-WS] Listening started (ScriptProcessorNode fallback)...');
-      detectSilence();
+      processor.connect(mutedGain);
+      mutedGain.connect(audioContext.destination);
+
+      console.log('[STT-WS] Listening started (ScriptProcessorNode fallback, native VAD)...');
+      // NOTE: intentionally NOT calling the global detectSilence() RAF loop here.
+      // This path drives resetSilenceTimer() from its own onaudioprocess RMS
+      // measurement above — a single, reliable silence-detection source.
     };
 
     // ── VAD loop start ────────────────────────────────────────────────────────
-    // detectSilence() is NOT called here. It is called exactly once, from
-    // inside whichever audio capture path successfully initialises:
-    //   • startAudioWorklet().then(...)      → calls detectSilence() at L458
-    //   • startScriptProcessorFallback()     → calls detectSilence() at L504
+    // detectSilence() is NOT called here. It is started exactly once, by the
+    // capture path that initialises:
+    //   • startAudioWorklet().then(...)  → starts the global detectSilence() RAF
+    //     loop (reads the shared analyser).
+    //   • startScriptProcessorFallback() → does NOT use detectSilence(); it
+    //     drives resetSilenceTimer() from its own native onaudioprocess RMS VAD.
     //
-    // Calling detectSilence() here would start a third concurrent RAF loop
-    // (one from this call + one from the capture path that succeeds). Two
-    // concurrent loops race to call resetSilenceTimer(1_200), continuously
-    // cancelling each other's setTimeout, so the silence window never expires
-    // and the app waits for the full 15-second hard timeout instead of the
-    // expected 1.2-second post-speech silence window.
+    // Calling detectSilence() here would start a second concurrent RAF loop
+    // racing the AudioWorklet path's loop to call resetSilenceTimer(1_200),
+    // continuously cancelling each other's setTimeout so the silence window
+    // never expires and the app waits out the full 15-second hard timeout.
   });
 }
 
